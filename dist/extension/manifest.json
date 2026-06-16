@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "K1mmis Phantom",
+  "version": "0.1.0",
+  "description": "Modular Tribal Wars userscript platform",
+  "content_scripts": [
+    {
+      "matches": ["*://*.tribalwars.com.br/game.php*"],
+      "js": ["engine.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}

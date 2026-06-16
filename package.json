@@ -1,0 +1,10 @@
+{
+  "name": "phantom-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:zip": "node build.mjs --zip"
+  }
+}
