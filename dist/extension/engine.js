@@ -229,6 +229,7 @@
       minimized = true;
       contentEl.style.display = "none";
       el.classList.add("ph-minimized");
+      el.style.height = "auto";
       btnMin.textContent = "+";
       btnMin.title = "Restaurar";
       applyPos(posX, posY);
@@ -421,6 +422,24 @@
       },
       get(path, init) {
         return fetch(path, { credentials: "same-origin", ...init });
+      },
+      editVillageNote(currentVillageId, targetVillageId, note) {
+        const gd = gameData.snapshot();
+        const csrf = gd?.csrf ?? "";
+        const sitter = gd?.player.sitter;
+        const url = new URL("/game.php", window.location.origin);
+        url.searchParams.set("village", currentVillageId);
+        url.searchParams.set("screen", "info_village");
+        url.searchParams.set("id", targetVillageId);
+        url.searchParams.set("ajaxaction", "edit_notes");
+        url.searchParams.set("h", csrf);
+        if (sitter) url.searchParams.set("t", String(sitter));
+        return fetch(url.toString(), {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ note })
+        });
       }
     };
   }
@@ -867,6 +886,7 @@
     .ph-win-btn:hover { color: var(--ph-text); border-color: var(--ph-gold); }
     .ph-win-btn-close:hover { color: #e44; border-color: #e44; }
 
+    .ph-window.ph-minimized { height: auto !important; min-height: 0 !important; }
     .ph-window.ph-minimized .ph-win-content { display: none; }
 
     .ph-win-content {
@@ -960,6 +980,30 @@
     .ph-nm-log-line.ok   { color: var(--ph-green); }
     .ph-nm-log-line.err  { color: #e55; }
     .ph-nm-log-line.info { color: var(--ph-text-dim); }
+
+    /* --- Renomear a Cores module (Phase 4) --- */
+    .ph-rc-group {
+      display: inline-flex;
+      gap: 2px;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+    .ph-rc-btn {
+      padding: 1px 5px;
+      border: 1px solid var(--ph-rc-color, #888);
+      border-radius: 2px;
+      background: transparent;
+      color: var(--ph-rc-color, #ccc);
+      cursor: pointer;
+      font-size: 9px;
+      font-family: Verdana, sans-serif;
+      white-space: nowrap;
+      line-height: 14px;
+    }
+    .ph-rc-btn:hover {
+      background: var(--ph-rc-color, #888);
+      color: #fff;
+    }
   `;
     document.head.appendChild(style);
   }
@@ -1055,8 +1099,8 @@
       list.push(mod);
       groups.set(mod.category, list);
     }
-    const visibleCategories = CATEGORY_ORDER.filter((cat) => (groups.get(cat)?.length ?? 0) > 0);
-    let selectedCategory = visibleCategories[0] ?? null;
+    const visibleCategories = CATEGORY_ORDER;
+    let selectedCategory = CATEGORY_ORDER.find((cat) => (groups.get(cat) ?? []).length > 0) ?? null;
     const activeState = /* @__PURE__ */ new Map();
     const indicators = /* @__PURE__ */ new Map();
     const toggleBtns = /* @__PURE__ */ new Map();
@@ -1088,7 +1132,7 @@
       if (!selectedCategory) {
         const empty = document.createElement("div");
         empty.className = "ph-dock-empty";
-        empty.textContent = "No modules available";
+        empty.textContent = "Nenhum m\xF3dulo dispon\xEDvel neste ecr\xE3";
         content.appendChild(empty);
         return;
       }
@@ -1096,7 +1140,15 @@
       heading.className = "ph-content-heading";
       heading.textContent = CATEGORY_LABELS[selectedCategory];
       content.appendChild(heading);
-      for (const mod of groups.get(selectedCategory) ?? []) {
+      const mods = groups.get(selectedCategory) ?? [];
+      if (mods.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "ph-dock-empty";
+        empty.textContent = "Nenhum m\xF3dulo dispon\xEDvel neste ecr\xE3";
+        content.appendChild(empty);
+        return;
+      }
+      for (const mod of mods) {
         renderedModuleIds.push(mod.id);
         const card = document.createElement("div");
         card.className = "ph-module-card";
@@ -1228,7 +1280,7 @@
     const openState = {};
     for (const mod of available) {
       const stored = await storage.get(enabledKey(mod.id));
-      enabledState[mod.id] = stored ?? true;
+      enabledState[mod.id] = stored ?? false;
       if (mod.activation === "toggle") {
         openState[mod.id] = await storage.get(openKey(mod.id)) ?? false;
       }
@@ -1267,16 +1319,16 @@
       async onToggleEnable(id, enabled) {
         enabledState[id] = enabled;
         await storage.set(enabledKey(id), enabled);
-        const manifest3 = available.find((m) => m.id === id);
-        if (!manifest3) return;
-        if (AUTO_KINDS2.includes(manifest3.activation)) {
+        const manifest4 = available.find((m) => m.id === id);
+        if (!manifest4) return;
+        if (AUTO_KINDS2.includes(manifest4.activation)) {
           if (enabled) {
             void registry.activate(id).then(() => dock?.setActive(id, registry.isActive(id)));
           } else {
             registry.deactivate(id);
             dock?.setActive(id, false);
           }
-        } else if (manifest3.activation === "toggle" && !enabled && registry.isActive(id)) {
+        } else if (manifest4.activation === "toggle" && !enabled && registry.isActive(id)) {
           openState[id] = false;
           await storage.set(openKey(id), false);
           registry.deactivate(id);
@@ -1494,12 +1546,7 @@
       }
       const { coord, record } = matched[i];
       try {
-        const res = await request.post({
-          village: String(record.id),
-          screen: "info_village",
-          action: "edit_notes",
-          body: { note }
-        });
+        const res = await request.editVillageNote(villageId, String(record.id), note);
         let success = res.ok;
         if (success) {
           try {
@@ -1537,10 +1584,10 @@
 
   // src/modules/notas-manuais/ui.ts
   var PRESETS = [
-    "ATAQUE",
-    "DEFESA",
-    "POSS\xCDVEL ATAQUE",
-    "POSS\xCDVEL DEFESA"
+    { label: "ATAQUE", value: "[b][size=20][color=#cc0000]ATAQUE[/color][/size][/b]" },
+    { label: "DEFESA", value: "[b][size=20][color=#1f7a1f]DEFESA[/color][/size][/b]" },
+    { label: "POSS\xCDVEL ATAQUE", value: "[b][size=20][color=#e07b00]POSS\xCDVEL ATAQUE[/color][/size][/b]" },
+    { label: "POSS\xCDVEL DEFESA", value: "[b][size=20][color=#1d5fb3]POSS\xCDVEL DEFESA[/color][/size][/b]" }
   ];
   var STORAGE_COORDS = "notas-manuais:coords";
   var STORAGE_NOTE = "notas-manuais:note";
@@ -1565,11 +1612,11 @@
     for (const preset of PRESETS) {
       const btn = document.createElement("button");
       btn.className = "ph-nm-preset";
-      btn.textContent = preset;
+      btn.textContent = preset.label;
       btn.addEventListener("click", () => {
-        noteTA.value = preset;
-        void storage.set(STORAGE_PRESET, preset);
-        void storage.set(STORAGE_NOTE, preset);
+        noteTA.value = preset.value;
+        void storage.set(STORAGE_PRESET, preset.value);
+        void storage.set(STORAGE_NOTE, preset.value);
       });
       presetsRow.appendChild(btn);
     }
@@ -1748,6 +1795,503 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   };
   var notas_manuais_default = notasManuaisModule;
 
+  // src/modules/renomear-cores/manifest.ts
+  var manifest3 = {
+    id: "renomear-cores",
+    name: "Renomear a Cores",
+    version: "1.0.0",
+    category: "attack-defense",
+    activation: "page",
+    allowedScreens: [
+      "overview" /* OVERVIEW */,
+      "overview_villages" /* OVERVIEW_VILLAGES */,
+      "info_village" /* INFO_VILLAGE */,
+      "place" /* PLACE */
+    ],
+    icon: "\u{1F3A8}",
+    description: "Bot\xF5es de renomea\xE7\xE3o r\xE1pida com cores nos ataques recebidos"
+  };
+
+  // src/modules/renomear-cores/constants.ts
+  var SETTINGS_TAGS = [
+    "[Morto]",
+    "[Desviado]",
+    "[Desviar]",
+    "[Reconquistar]",
+    "[Reconquistado]",
+    "[Snipado]",
+    "[Snipar]",
+    "[Fubar]",
+    "[Fubado]",
+    "[Snipe Cancel]",
+    "[Aten\xE7\xE3o]",
+    "[RIP]",
+    "[Fake]",
+    "[Rezar]",
+    "[Refor\xE7ar]",
+    " | Retirar tropas",
+    " | Vigiar",
+    " | \u2713"
+  ];
+  var SETTINGS_LABELS = [
+    "M",
+    "D!",
+    "D",
+    "R",
+    "RR",
+    "S!",
+    "S",
+    "FU",
+    "FUB",
+    "SC",
+    "Att",
+    "RIP",
+    "FK",
+    "RZ",
+    "RF",
+    "R!",
+    "V!",
+    "\u2713"
+  ];
+  var SETTINGS_COLORS = [
+    "green",
+    "orange",
+    "dorange",
+    "gray",
+    "green",
+    "green",
+    "blue",
+    "dgreen",
+    "green",
+    "red",
+    "Pink",
+    "dblue",
+    "green",
+    "dblue",
+    "black",
+    "dgreen",
+    "yellow",
+    "lgreen"
+  ];
+  var SETTINGS_TEXT = [
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "black",
+    "white",
+    "white",
+    "white",
+    "white",
+    "white",
+    "black",
+    "black"
+  ];
+  var COLOR_NAMES = [
+    "red",
+    "green",
+    "blue",
+    "yellow",
+    "orange",
+    "lblue",
+    "lime",
+    "white",
+    "black",
+    "gray",
+    "dorange",
+    "black",
+    "Pink",
+    "brown",
+    "dblue",
+    "dgreen",
+    "lgreen"
+  ];
+  var COLOR_TOP = [
+    "#e20606",
+    "#31c908",
+    "#0d83dd",
+    "#ffd91c",
+    "#ef8b10",
+    "#22e5db",
+    "#ffd400",
+    "#ffffff",
+    "#000000",
+    "#adb6c6",
+    "#9232a8",
+    "#40434E",
+    "#FFC0CB",
+    "#892929",
+    "#00007f",
+    "#004c00",
+    "#93cf82"
+  ];
+  var COLOR_BOT = [
+    "#ff0000",
+    "#228c05",
+    "#0860a3",
+    "#e8c30d",
+    "#d3790a",
+    "#0cd3c9",
+    "#ffd400",
+    "#dbdbdb",
+    "#000000",
+    "#828891",
+    "#9232a8",
+    "#40434E",
+    "#FFC0CB",
+    "#892929",
+    "#00007f",
+    "#004c00",
+    "#93cf82"
+  ];
+  var NOTE_COLORS = { ataque: "red", defesa: "lblue" };
+  var DEFAULT_COLORING_MODE = "coluna";
+  var FONT_SIZE = 8;
+
+  // src/modules/renomear-cores/service.ts
+  function buildPresets() {
+    return SETTINGS_TAGS.map((tag, i) => ({
+      tag,
+      label: SETTINGS_LABELS[i] ?? "",
+      colorName: SETTINGS_COLORS[i] ?? "white",
+      textColorName: SETTINGS_TEXT[i] ?? "black",
+      isAppend: tag.includes("|")
+    }));
+  }
+  function getTopColor(name) {
+    const i = COLOR_NAMES.indexOf(name);
+    return i === -1 ? name : COLOR_TOP[i] ?? name;
+  }
+  function getBotColor(name) {
+    const i = COLOR_NAMES.indexOf(name);
+    return i === -1 ? name : COLOR_BOT[i] ?? name;
+  }
+  function getCommandName(row) {
+    const el = row.querySelector(
+      ".quickedit-content, .quickedit-name, .rename-content, .rename-name"
+    );
+    return el?.textContent?.trim() ?? "";
+  }
+  function getNewName(currentName, tag, isAppend) {
+    if (isAppend) return currentName + tag;
+    return (currentName.split(" ")[0] ?? "") + " " + tag;
+  }
+  function checkDualTag(name) {
+    for (let i = 0; i < SETTINGS_TAGS.length; i++) {
+      for (let j = 0; j < SETTINGS_TAGS.length; j++) {
+        if (name.includes(SETTINGS_TAGS[i] + SETTINGS_TAGS[j])) {
+          return {
+            color1: getBotColor(SETTINGS_COLORS[i]),
+            color2: getBotColor(SETTINGS_COLORS[j])
+          };
+        }
+      }
+    }
+    return null;
+  }
+  function findTagIndex(name) {
+    for (let i = 0; i < SETTINGS_TAGS.length; i++) {
+      if (name.includes(SETTINGS_TAGS[i])) return i;
+    }
+    return -1;
+  }
+  function isSupport(row) {
+    const img = row.querySelector("img");
+    return img !== null && img.src.includes("support");
+  }
+  function applyRowColor(row, mode, bgColor, textColor) {
+    if (mode === "nada") return;
+    if (mode === "coluna") {
+      const firstTd = row.querySelector("td");
+      if (!firstTd) return;
+      firstTd.style.backgroundColor = bgColor;
+      const link = firstTd.querySelector("a");
+      if (link) link.style.color = textColor;
+    } else {
+      row.querySelectorAll("td").forEach((td) => {
+        td.style.backgroundColor = bgColor;
+      });
+    }
+  }
+  function applyDualTagColor(row, mode, color1, color2) {
+    if (mode === "nada") return;
+    const gradient = `repeating-linear-gradient(45deg,${color1},${color1} 10px,${color2} 10px,${color2} 20px)`;
+    if (mode === "coluna") {
+      const firstTd = row.querySelector("td");
+      if (firstTd) firstTd.style.background = gradient;
+    } else {
+      row.querySelectorAll("td").forEach((td) => {
+        td.style.background = gradient;
+      });
+    }
+  }
+  function colorByVillageNote(row, mode) {
+    if (mode === "nada") return;
+    const imgs = row.querySelectorAll("img");
+    for (const img of Array.from(imgs)) {
+      if (!img.classList.contains("icon_village_notes") && !img.dataset.title && !img.hasAttribute("title")) continue;
+      const txt = (img.dataset.title ?? img.getAttribute("title") ?? "").toLowerCase();
+      if (!txt) continue;
+      let colorName = null;
+      if (txt.includes("ataque") || txt.includes("ofensiv")) colorName = NOTE_COLORS.ataque;
+      else if (txt.includes("defesa") || txt.includes("defensiv")) colorName = NOTE_COLORS.defesa;
+      if (!colorName) continue;
+      const td = img.closest("td");
+      if (td) td.style.backgroundColor = getBotColor(colorName);
+      break;
+    }
+  }
+  function renameCommand(row, newName, onDone) {
+    const renameIcon = row.querySelector(".rename-icon");
+    if (renameIcon) {
+      _renameViaIcon(renameIcon, row, newName, onDone);
+      return;
+    }
+    const pencil = row.querySelector(".quickedit-pencil");
+    if (!pencil) {
+      onDone?.();
+      return;
+    }
+    _renameViaPencil(pencil, row, newName, onDone);
+  }
+  function _renameViaIcon(icon, row, newName, onDone) {
+    const observer = new MutationObserver(() => {
+      const input = row.querySelector('input[type="text"]');
+      if (!input) return;
+      observer.disconnect();
+      clearTimeout(timeout);
+      input.value = newName;
+      const submit = row.querySelector('input[type="button"]');
+      if (submit) {
+        submit.click();
+      } else {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+      }
+      onDone?.();
+    });
+    observer.observe(row, { childList: true, subtree: true });
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      onDone?.();
+    }, 2e3);
+    icon.click();
+  }
+  function _renameViaPencil(pencil, row, newName, onDone) {
+    const cell = pencil.closest("td") ?? row;
+    const observer = new MutationObserver(() => {
+      const input = cell.querySelector('.quickedit-input, input[type="text"]');
+      if (!input) return;
+      observer.disconnect();
+      clearTimeout(timeout);
+      input.value = newName;
+      const save = cell.querySelector(".quickedit-save");
+      if (save) {
+        save.click();
+      } else {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+      }
+      onDone?.();
+    });
+    observer.observe(cell, { childList: true, subtree: true });
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      onDone?.();
+    }, 2e3);
+    pencil.click();
+  }
+
+  // src/modules/renomear-cores/ui.ts
+  var PROCESSED_ATTR = "data-ph-rc";
+  var BUSY_ATTR = "data-ph-rc-busy";
+  var PRESETS2 = buildPresets();
+  function findRenameCell(row) {
+    for (const td of Array.from(row.querySelectorAll("td"))) {
+      if (td.querySelector(".quickedit, .rename-icon, .quickedit-pencil")) return td;
+    }
+    return null;
+  }
+  function clearRowColor(row) {
+    row.querySelectorAll("td").forEach((td) => {
+      td.style.backgroundColor = "";
+      td.style.background = "";
+    });
+    const link = row.querySelector("td:first-child a");
+    if (link) link.style.color = "";
+  }
+  function processRow(row, mode) {
+    if (row.hasAttribute(PROCESSED_ATTR)) return;
+    const tds = row.querySelectorAll("td");
+    if (tds.length === 0) return;
+    const name = getCommandName(row);
+    const dual = checkDualTag(name);
+    if (dual) {
+      applyDualTagColor(row, mode, dual.color1, dual.color2);
+    } else {
+      const tagIdx = findTagIndex(name);
+      if (tagIdx >= 0) {
+        applyRowColor(row, mode, getBotColor(SETTINGS_COLORS[tagIdx]), getTopColor(SETTINGS_TEXT[tagIdx]));
+      } else if (isSupport(row)) {
+        applyRowColor(row, mode, getBotColor("yellow"), "#000000");
+      } else {
+        applyRowColor(row, mode, getBotColor("red"), "#ffffff");
+      }
+    }
+    colorByVillageNote(row, mode);
+    const targetCell = findRenameCell(row);
+    if (!targetCell) {
+      row.setAttribute(PROCESSED_ATTR, "1");
+      return;
+    }
+    const group = document.createElement("span");
+    group.className = "ph-rc-group";
+    group.style.fontSize = `${FONT_SIZE}pt`;
+    for (let i = 0; i < PRESETS2.length; i++) {
+      const preset = PRESETS2[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ph-rc-btn";
+      btn.textContent = preset.label;
+      btn.style.backgroundColor = getBotColor(preset.colorName);
+      btn.style.color = getTopColor(preset.textColorName);
+      btn.title = preset.tag;
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (row.hasAttribute(BUSY_ATTR)) return;
+        row.setAttribute(BUSY_ATTR, "1");
+        const currentName = getCommandName(row);
+        const newName = getNewName(currentName, preset.tag, preset.isAppend);
+        renameCommand(row, newName, () => {
+          row.removeAttribute(BUSY_ATTR);
+          row.removeAttribute(PROCESSED_ATTR);
+          row.querySelector(".ph-rc-group")?.remove();
+          clearRowColor(row);
+        });
+      });
+      group.appendChild(btn);
+    }
+    row.setAttribute(PROCESSED_ATTR, "1");
+    targetCell.appendChild(group);
+  }
+  function processAll(table, mode) {
+    table.querySelectorAll("tr").forEach((row) => processRow(row, mode));
+  }
+  function addMassButtons(th, table, mode) {
+    if (th.querySelector(".ph-rc-mass-group")) return;
+    const group = document.createElement("span");
+    group.className = "ph-rc-group ph-rc-mass-group";
+    group.style.fontSize = `${FONT_SIZE}pt`;
+    for (let i = 0; i < PRESETS2.length; i++) {
+      const preset = PRESETS2[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ph-rc-btn";
+      btn.textContent = preset.label;
+      btn.style.backgroundColor = getBotColor(preset.colorName);
+      btn.style.color = getTopColor(preset.textColorName);
+      btn.title = `Renomear selecionados: ${preset.tag}`;
+      btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rows = Array.from(
+          table.querySelectorAll('input[type="checkbox"]:checked')
+        ).map((cb) => cb.closest("tr")).filter((r) => r !== null);
+        for (let j = 0; j < rows.length; j++) {
+          const row = rows[j];
+          if (row.hasAttribute(BUSY_ATTR)) continue;
+          row.setAttribute(BUSY_ATTR, "1");
+          const currentName = getCommandName(row);
+          const newName = getNewName(currentName, preset.tag, preset.isAppend);
+          row.removeAttribute(PROCESSED_ATTR);
+          row.querySelector(".ph-rc-group")?.remove();
+          clearRowColor(row);
+          renameCommand(row, newName, () => {
+            row.removeAttribute(BUSY_ATTR);
+          });
+          if (j < rows.length - 1) await delay2(200);
+        }
+      });
+      group.appendChild(btn);
+    }
+    th.appendChild(group);
+  }
+  function findSelectAllTh(table) {
+    const bar = document.getElementById("ignored_commands_bar");
+    if (bar) {
+      const th = bar.querySelector("th");
+      if (th) return th;
+    }
+    for (const th of Array.from(table.querySelectorAll("th"))) {
+      if (th.querySelector("input.selectAll")) return th;
+    }
+    return null;
+  }
+  function delay2(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+  function initUi3(table, mode = DEFAULT_COLORING_MODE) {
+    processAll(table, mode);
+    const selectAllTh = findSelectAllTh(table);
+    if (selectAllTh) addMassButtons(selectAllTh, table, mode);
+    let debounce = null;
+    let processing = false;
+    const observer = new MutationObserver((mutations) => {
+      if (processing) return;
+      if (!mutations.some((m) => m.addedNodes.length > 0)) return;
+      if (debounce !== null) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        debounce = null;
+        processing = true;
+        try {
+          processAll(table, mode);
+          if (selectAllTh) addMassButtons(selectAllTh, table, mode);
+        } finally {
+          processing = false;
+        }
+      }, 80);
+    });
+    observer.observe(table, { childList: true, subtree: true });
+    return function destroy() {
+      observer.disconnect();
+      if (debounce !== null) {
+        clearTimeout(debounce);
+        debounce = null;
+      }
+      table.querySelectorAll(`[${PROCESSED_ATTR}]`).forEach((row) => {
+        row.removeAttribute(PROCESSED_ATTR);
+        row.removeAttribute(BUSY_ATTR);
+        clearRowColor(row);
+        row.querySelectorAll(".ph-rc-group").forEach((g) => g.remove());
+      });
+      document.querySelectorAll(".ph-rc-mass-group").forEach((g) => g.remove());
+    };
+  }
+
+  // src/modules/renomear-cores/index.ts
+  var destroyUi = null;
+  var renomearCoresModule = {
+    manifest: manifest3,
+    init(ctx) {
+      const table = document.getElementById("incomings_table");
+      if (!table) {
+        ctx.services.logger.info("incomings_table not found on this screen \u2014 skipping");
+        return;
+      }
+      destroyUi = initUi3(table);
+    },
+    destroy() {
+      destroyUi?.();
+      destroyUi = null;
+    }
+  };
+  var renomear_cores_default = renomearCoresModule;
+
   // src/bootstrap.ts
   async function boot() {
     const gameData = createGameDataService();
@@ -1766,6 +2310,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     const registry = createRegistry({ state, eventBus, services });
     registry.register(status_overview_default);
     registry.register(notas_manuais_default);
+    registry.register(renomear_cores_default);
     await bootShell(registry, services, gd.screen);
   }
   void boot();
