@@ -90,6 +90,7 @@
         pending.add(id);
         try {
           await module.init(buildContext(module, hubContent));
+          if (hubContent && module.manifest.activation === "background") return;
           active.add(id);
         } finally {
           pending.delete(id);
@@ -99,6 +100,9 @@
         if (!active.has(id)) return;
         active.delete(id);
         modules.get(id)?.destroy();
+      },
+      disposeUi(id) {
+        modules.get(id)?.disposeUi?.();
       },
       list() {
         return Array.from(modules.values()).map((m) => m.manifest);
@@ -554,6 +558,75 @@
     };
   }
 
+  // src/services/keep-alive.ts
+  function createKeepAliveService(logger) {
+    const holders = /* @__PURE__ */ new Set();
+    let audio = null;
+    let resumeArmed = false;
+    function startAntiFreeze() {
+      if (audio) return;
+      try {
+        const AudioCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtor) throw new Error("AudioContext unavailable");
+        const ctx = new AudioCtor();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        audio = { ctx, osc, gain };
+        logger.info("[AutoResSender] Anti-freeze audio iniciado");
+        void resumeOrArm();
+      } catch (e) {
+        logger.warn("Anti-freeze audio falhou:", e);
+      }
+    }
+    async function resumeOrArm() {
+      if (!audio || audio.ctx.state !== "suspended") return;
+      try {
+        await audio.ctx.resume();
+      } catch (e) {
+        logger.warn("Anti-freeze audio resume falhou:", e);
+      }
+      if (audio.ctx.state === "suspended") armGestureResume();
+    }
+    function armGestureResume() {
+      if (resumeArmed) return;
+      resumeArmed = true;
+      const resume = () => {
+        resumeArmed = false;
+        window.removeEventListener("pointerdown", resume, true);
+        window.removeEventListener("keydown", resume, true);
+        void resumeOrArm();
+      };
+      window.addEventListener("pointerdown", resume, { once: true, capture: true });
+      window.addEventListener("keydown", resume, { once: true, capture: true });
+    }
+    function stopAntiFreeze() {
+      const current = audio;
+      if (!current) return;
+      audio = null;
+      try {
+        current.osc.stop();
+      } catch {
+      }
+      current.osc.disconnect();
+      current.gain.disconnect();
+      void current.ctx.close().catch((e) => logger.warn("Anti-freeze audio close falhou:", e));
+    }
+    return {
+      acquire(moduleId) {
+        holders.add(moduleId);
+        startAntiFreeze();
+      },
+      release(moduleId) {
+        holders.delete(moduleId);
+        if (holders.size === 0) stopAntiFreeze();
+      }
+    };
+  }
+
   // src/ui/theme.ts
   var THEME_ID = "phantom-theme";
   function injectTheme() {
@@ -598,10 +671,38 @@
       /* Layout */
       --ph-radius:           4px;
       --ph-brand-radius:     3px;
+      --ph-launcher-mark-size: 25px;
       --ph-header-mark-size:   26px;
       --ph-z-strip:    2147482000;
       --ph-z-overlay:  2147482500;
       --ph-z-root:     2147483000;
+    }
+
+    /* --- Launcher (quest-bar anchor) --- */
+    #phantom-launcher {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 27px;
+      height: 27px;
+      cursor: pointer;
+      background: var(--ph-bg);
+      border: 1px solid var(--ph-border);
+      border-radius: var(--ph-radius);
+      color: var(--ph-header);
+      z-index: var(--ph-z-strip);
+      user-select: none;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+    #phantom-launcher:hover { border-color: var(--ph-icon); }
+    .ph-launcher-mark {
+      width: var(--ph-launcher-mark-size);
+      height: var(--ph-launcher-mark-size);
+      border-radius: var(--ph-brand-radius);
+      object-fit: cover;
+      display: block;
+      pointer-events: none;
     }
 
     /* ===== HUB MODAL ===== */
@@ -1408,6 +1509,27 @@
   // src/ui/brand.ts
   var PHANTOM_MARK_DATA_URI = "data:image/png;base64,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";
 
+  // src/ui/utils.ts
+  function waitForElement(id, timeoutMs) {
+    const el = document.getElementById(id);
+    if (el) return Promise.resolve(el);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        resolve(null);
+      }, timeoutMs);
+      const observer = new MutationObserver(() => {
+        const found = document.getElementById(id);
+        if (found) {
+          clearTimeout(timer);
+          observer.disconnect();
+          resolve(found);
+        }
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    });
+  }
+
   // src/ui/shell/index.ts
   var CATEGORY_LABELS = {
     "scripts-aldeia": "Scripts de aldeia",
@@ -1562,16 +1684,6 @@
     document.body.appendChild(overlay);
     const strip = document.createElement("div");
     strip.id = "phantom-strip";
-    const stripLauncher = document.createElement("button");
-    stripLauncher.type = "button";
-    stripLauncher.className = "ph-strip-item ph-strip-launcher";
-    stripLauncher.title = "Phantom";
-    const launcherImg = document.createElement("img");
-    launcherImg.src = PHANTOM_MARK_DATA_URI;
-    launcherImg.alt = "Phantom";
-    stripLauncher.appendChild(launcherImg);
-    stripLauncher.addEventListener("click", () => overlay.classList.toggle("ph-hidden"));
-    strip.appendChild(stripLauncher);
     const stripCollapse = document.createElement("button");
     stripCollapse.type = "button";
     stripCollapse.className = "ph-strip-item ph-strip-collapse";
@@ -1586,6 +1698,8 @@
     strip.appendChild(stripCollapse);
     const stripCatIcons = /* @__PURE__ */ new Map();
     document.body.appendChild(strip);
+    let questLauncher = null;
+    void mountQuestLauncher();
     void loadProfileDetails().then((details) => {
       if (!details || destroyed) return;
       profileDetails = details;
@@ -1876,7 +1990,6 @@
         btn.type = "button";
         btn.className = m.surface === "tool" ? "ph-btn-open" : "ph-btn-config";
         btn.textContent = label;
-        btn.disabled = !(localEnabled.get(m.id) ?? true);
         btn.addEventListener("click", () => {
           const contentEl = document.createElement("div");
           void callbacks.onOpenModule(m.id, contentEl).then(() => {
@@ -1894,8 +2007,6 @@
         const enabled = toggle.checked;
         localEnabled.set(m.id, enabled);
         callbacks.onToggleEnable(m.id, enabled);
-        const openBtn = controls.querySelector(".ph-btn-open, .ph-btn-config");
-        if (openBtn) openBtn.disabled = !enabled;
         if (!enabled && router.view === "module" && router.moduleId === m.id) {
           navigate({ view: "category", cat });
         }
@@ -1977,10 +2088,27 @@
         if (destroyed) return;
         destroyed = true;
         for (const unsub of monitorUnsubs) unsub();
+        questLauncher?.remove();
         overlay.remove();
         strip.remove();
       }
     };
+    async function mountQuestLauncher() {
+      const anchorEl = await waitForElement("new_quest", 5e3);
+      if (!anchorEl || destroyed) return;
+      const launcher = document.createElement("div");
+      launcher.id = "phantom-launcher";
+      launcher.className = "quest";
+      launcher.title = "Phantom";
+      const launcherMark = document.createElement("img");
+      launcherMark.className = "ph-launcher-mark";
+      launcherMark.src = PHANTOM_MARK_DATA_URI;
+      launcherMark.alt = "Phantom";
+      launcher.appendChild(launcherMark);
+      launcher.addEventListener("click", () => overlay.classList.toggle("ph-hidden"));
+      anchorEl.insertAdjacentElement("afterend", launcher);
+      questLauncher = launcher;
+    }
   }
   function formatDuration(ms) {
     const s = Math.floor(ms / 1e3);
@@ -2109,7 +2237,10 @@
         },
         onCloseModule(id) {
           const manifest5 = available.find((m) => m.id === id);
-          if (manifest5?.activation === "background") return;
+          if (manifest5?.activation === "background") {
+            registry.disposeUi(id);
+            return;
+          }
           registry.deactivate(id);
           hub?.setActive(id, false);
         },
@@ -2171,27 +2302,6 @@
         wrapper.remove();
       }
     };
-  }
-
-  // src/ui/utils.ts
-  function waitForElement(id, timeoutMs) {
-    const el = document.getElementById(id);
-    if (el) return Promise.resolve(el);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        observer.disconnect();
-        resolve(null);
-      }, timeoutMs);
-      const observer = new MutationObserver(() => {
-        const found = document.getElementById(id);
-        if (found) {
-          clearTimeout(timer);
-          observer.disconnect();
-          resolve(found);
-        }
-      });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-    });
   }
 
   // src/modules/status-overview/ui.ts
@@ -3080,7 +3190,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     id: "auto-res-sender",
     name: "Auto Res Sender",
     version: "1.0.0",
-    category: "farm-buscas",
+    category: "cunhagem",
     subcategory: "Recursos",
     chainable: true,
     activation: "background",
@@ -3140,6 +3250,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       });
     }
     async start() {
+      this.ctx.services.keepAlive?.acquire(MODULE_ID);
       const storage = this.storage();
       const existing = await storage.get(STORAGE_KEYS.runtime);
       const now = Date.now();
@@ -3158,6 +3269,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     async stop() {
       this.destroyed = true;
       this.unsubscribeClear();
+      this.ctx.services.keepAlive?.release(MODULE_ID);
       await this.ctx.services.scheduler?.unregister(MODULE_ID);
       await this.storage().remove(STORAGE_KEYS.runtime);
       await this.publishMonitor("off");
@@ -3679,10 +3791,6 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     actions.append(save, status);
     root.appendChild(actions);
     contentEl.appendChild(root);
-    const removalObserver = new MutationObserver(() => {
-      if (!document.body.contains(contentEl)) cleanup();
-    });
-    removalObserver.observe(document.body, { childList: true, subtree: true });
     function readConfig() {
       const destinationsConfig = rows.map((row) => ({
         coord: row.querySelector(".ph-ars-coord")?.value.trim() ?? "",
@@ -3700,11 +3808,11 @@ Aten\xE7\xE3o: substitui as notas existentes.`
         cycleInterval: cycleInterval.value
       };
     }
-    function cleanup() {
-      removalObserver.disconnect();
-      root.remove();
-    }
-    return { destroy: cleanup };
+    return {
+      destroy() {
+        root.remove();
+      }
+    };
   }
   function section(label, child) {
     const wrap = document.createElement("div");
@@ -3776,9 +3884,12 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       }
       await service.start();
     },
-    destroy() {
+    disposeUi() {
       cleanupUi3?.();
       cleanupUi3 = null;
+    },
+    destroy() {
+      this.disposeUi?.();
       void service?.stop();
       service = null;
     }
@@ -3793,14 +3904,16 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     const state = createStateStore();
     const eventBus = createEventBus();
     const storage = createStorageService();
+    const logger = createLogger();
     const services = {
       gameData,
-      logger: createLogger(),
+      logger,
       storage,
       windows: createWindowManager(storage),
       request: createRequestService(gameData),
       scheduler: createSchedulerService(storage),
-      worldConfig: createWorldConfigService(gameData, storage)
+      worldConfig: createWorldConfigService(gameData, storage),
+      keepAlive: createKeepAliveService(logger.scoped("keep-alive"))
     };
     const registry = createRegistry({ state, eventBus, services });
     registry.register(status_overview_default);
