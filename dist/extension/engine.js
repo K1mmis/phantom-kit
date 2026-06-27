@@ -3201,7 +3201,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   // src/modules/auto-res-sender/manifest.ts
   var manifest4 = {
     id: "auto-res-sender",
-    name: "Auto Res Sender",
+    name: "Enviar recursos automatico",
     version: "1.0.0",
     category: "cunhagem",
     subcategory: "Recursos",
