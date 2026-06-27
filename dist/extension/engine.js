@@ -1591,6 +1591,7 @@
       monitorUnsubs.push(eventBus.on(key, (details) => {
         monitorDetails.set(m.id, details);
         if (router.view === "home") renderContent();
+        if (details.badge != null) updateStrip();
       }));
     }
     const byCategory = /* @__PURE__ */ new Map();
@@ -1874,12 +1875,12 @@
           }
           summary.appendChild(breakdown);
         }
-        if (details.message) {
-          const msg = document.createElement("div");
-          msg.className = "ph-mon-message";
-          msg.textContent = details.message;
-          summary.appendChild(msg);
-        }
+      }
+      if (details?.message) {
+        const msg = document.createElement("div");
+        msg.className = "ph-mon-message";
+        msg.textContent = details.message;
+        summary.appendChild(msg);
       }
       row.appendChild(summary);
       return row;
@@ -2041,25 +2042,35 @@
       view.append(topbar, subContent);
       contentArea.appendChild(view);
     }
+    function stripBadgeForCat(cat) {
+      const mods = byCategory.get(cat) ?? [];
+      let badgeSum = 0;
+      for (const m of mods) {
+        if (activeState.get(m.id)) {
+          const d = monitorDetails.get(m.id);
+          if (d?.badge != null) badgeSum += d.badge;
+        }
+      }
+      return badgeSum > 0 ? badgeSum : activeCountForCat(cat);
+    }
     function updateStrip() {
       for (const [, el] of stripCatIcons) el.remove();
       stripCatIcons.clear();
       strip.classList.toggle("ph-strip-collapsed", stripCollapsed);
       if (stripCollapsed) return;
       for (const cat of CATEGORY_ORDER) {
-        const count = activeCountForCat(cat);
-        if (count === 0) continue;
+        const activeCount = activeCountForCat(cat);
+        if (activeCount === 0) continue;
+        const badgeCount = stripBadgeForCat(cat);
         const item = document.createElement("button");
         item.type = "button";
         item.className = "ph-strip-item";
         item.title = CATEGORY_LABELS[cat];
         item.textContent = CATEGORY_ICONS[cat];
-        if (count > 0) {
-          const badge = document.createElement("span");
-          badge.className = "ph-strip-badge";
-          badge.textContent = String(count);
-          item.appendChild(badge);
-        }
+        const badge = document.createElement("span");
+        badge.className = "ph-strip-badge";
+        badge.textContent = String(badgeCount);
+        item.appendChild(badge);
         item.addEventListener("click", () => {
           overlay.classList.remove("ph-hidden");
           navigate({ view: "category", cat });
@@ -2197,7 +2208,7 @@
     const enabledState = {};
     for (const mod of available) {
       const stored = await storage.get(enabledKey(mod.id));
-      enabledState[mod.id] = stored ?? false;
+      enabledState[mod.id] = stored ?? (mod.defaultEnabled ?? false);
     }
     let hub = null;
     if (services.windows) {
@@ -2224,9 +2235,9 @@
         async onToggleEnable(id, enabled) {
           enabledState[id] = enabled;
           await storage.set(enabledKey(id), enabled);
-          const manifest5 = available.find((m) => m.id === id);
-          if (!manifest5) return;
-          if (AUTO_KINDS2.includes(manifest5.activation)) {
+          const manifest6 = available.find((m) => m.id === id);
+          if (!manifest6) return;
+          if (AUTO_KINDS2.includes(manifest6.activation)) {
             if (enabled) {
               await registry.activate(id);
               hub?.setActive(id, registry.isActive(id));
@@ -2240,8 +2251,8 @@
           }
         },
         async onOpenModule(id, contentEl) {
-          const manifest5 = available.find((m) => m.id === id);
-          const keepBackgroundAlive = manifest5?.activation === "background" && registry.isActive(id);
+          const manifest6 = available.find((m) => m.id === id);
+          const keepBackgroundAlive = manifest6?.activation === "background" && registry.isActive(id);
           if (registry.isActive(id) && !keepBackgroundAlive) {
             registry.deactivate(id);
           }
@@ -2249,8 +2260,8 @@
           hub?.setActive(id, registry.isActive(id));
         },
         onCloseModule(id) {
-          const manifest5 = available.find((m) => m.id === id);
-          if (manifest5?.activation === "background") {
+          const manifest6 = available.find((m) => m.id === id);
+          if (manifest6?.activation === "background") {
             registry.disposeUi(id);
             return;
           }
@@ -2706,7 +2717,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     name: "Renomear a Cores",
     version: "1.0.0",
     category: "kit-defesa",
-    subcategory: "Renomear",
+    subcategory: "Comandos",
     activation: "page",
     allowedScreens: [
       "overview" /* OVERVIEW */,
@@ -2715,7 +2726,9 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       "place" /* PLACE */
     ],
     icon: "\u{1F3A8}",
-    description: "Botoes de renomeacao rapida com cores nos ataques recebidos"
+    description: "Botoes de renomeacao rapida com cores nos ataques recebidos",
+    surface: "config",
+    defaultEnabled: true
   };
 
   // src/modules/renomear-cores/constants.ts
@@ -2859,14 +2872,41 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   var NOTE_COLORS = { ataque: "red", defesa: "lblue" };
   var DEFAULT_COLORING_MODE = "coluna";
   var FONT_SIZE = 8;
+  var DEFAULTS = {
+    tags: Array.from(SETTINGS_TAGS),
+    labels: Array.from(SETTINGS_LABELS),
+    colors: Array.from(SETTINGS_COLORS),
+    textColors: Array.from(SETTINGS_TEXT),
+    noteColors: { ataque: NOTE_COLORS.ataque, defesa: NOTE_COLORS.defesa },
+    coloringMode: DEFAULT_COLORING_MODE,
+    fontSize: FONT_SIZE
+  };
+  var SELECTABLE_COLORS = [
+    { name: "red", hex: "#ff0000" },
+    { name: "green", hex: "#228c05" },
+    { name: "blue", hex: "#0860a3" },
+    { name: "yellow", hex: "#e8c30d" },
+    { name: "orange", hex: "#d3790a" },
+    { name: "lblue", hex: "#0cd3c9" },
+    { name: "lime", hex: "#ffd400" },
+    { name: "white", hex: "#dbdbdb" },
+    { name: "black", hex: "#000000" },
+    { name: "gray", hex: "#828891" },
+    { name: "dorange", hex: "#9232a8" },
+    { name: "Pink", hex: "#FFC0CB" },
+    { name: "brown", hex: "#892929" },
+    { name: "dblue", hex: "#00007f" },
+    { name: "dgreen", hex: "#004c00" },
+    { name: "lgreen", hex: "#93cf82" }
+  ];
 
   // src/modules/renomear-cores/service.ts
-  function buildPresets() {
-    return SETTINGS_TAGS.map((tag, i) => ({
+  function buildPresets(config) {
+    return config.tags.map((tag, i) => ({
       tag,
-      label: SETTINGS_LABELS[i] ?? "",
-      colorName: SETTINGS_COLORS[i] ?? "white",
-      textColorName: SETTINGS_TEXT[i] ?? "black",
+      label: config.labels[i] ?? "",
+      colorName: config.colors[i] ?? "white",
+      textColorName: config.textColors[i] ?? "black",
       isAppend: tag.includes("|")
     }));
   }
@@ -2888,22 +2928,22 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     if (isAppend) return currentName + tag;
     return (currentName.split(" ")[0] ?? "") + " " + tag;
   }
-  function checkDualTag(name) {
-    for (let i = 0; i < SETTINGS_TAGS.length; i++) {
-      for (let j = 0; j < SETTINGS_TAGS.length; j++) {
-        if (name.includes(SETTINGS_TAGS[i] + SETTINGS_TAGS[j])) {
+  function checkDualTag(name, presets) {
+    for (let i = 0; i < presets.length; i++) {
+      for (let j = 0; j < presets.length; j++) {
+        if (name.includes(presets[i].tag + presets[j].tag)) {
           return {
-            color1: getBotColor(SETTINGS_COLORS[i]),
-            color2: getBotColor(SETTINGS_COLORS[j])
+            color1: getBotColor(presets[i].colorName),
+            color2: getBotColor(presets[j].colorName)
           };
         }
       }
     }
     return null;
   }
-  function findTagIndex(name) {
-    for (let i = 0; i < SETTINGS_TAGS.length; i++) {
-      if (name.includes(SETTINGS_TAGS[i])) return i;
+  function findTagIndex(name, presets) {
+    for (let i = 0; i < presets.length; i++) {
+      if (name.includes(presets[i].tag)) return i;
     }
     return -1;
   }
@@ -2937,7 +2977,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       });
     }
   }
-  function colorByVillageNote(row, mode) {
+  function colorByVillageNote(row, mode, noteColors) {
     if (mode === "nada") return;
     const imgs = row.querySelectorAll("img");
     for (const img of Array.from(imgs)) {
@@ -2945,8 +2985,8 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       const txt = (img.dataset.title ?? img.getAttribute("title") ?? "").toLowerCase();
       if (!txt) continue;
       let colorName = null;
-      if (txt.includes("ataque") || txt.includes("ofensiv")) colorName = NOTE_COLORS.ataque;
-      else if (txt.includes("defesa") || txt.includes("defensiv")) colorName = NOTE_COLORS.defesa;
+      if (txt.includes("ataque") || txt.includes("ofensiv")) colorName = noteColors.ataque;
+      else if (txt.includes("defesa") || txt.includes("defensiv")) colorName = noteColors.defesa;
       if (!colorName) continue;
       const td = img.closest("td");
       if (td) td.style.backgroundColor = getBotColor(colorName);
@@ -3015,7 +3055,6 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   // src/modules/renomear-cores/ui.ts
   var PROCESSED_ATTR = "data-ph-rc";
   var BUSY_ATTR = "data-ph-rc-busy";
-  var PRESETS2 = buildPresets();
   function findRenameCell(row) {
     for (const td of Array.from(row.querySelectorAll("td"))) {
       if (td.querySelector(".quickedit, .rename-icon, .quickedit-pencil")) return td;
@@ -3030,121 +3069,125 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     const link = row.querySelector("td:first-child a");
     if (link) link.style.color = "";
   }
-  function processRow(row, mode) {
-    if (row.hasAttribute(PROCESSED_ATTR)) return;
-    const tds = row.querySelectorAll("td");
-    if (tds.length === 0) return;
-    const name = getCommandName(row);
-    const dual = checkDualTag(name);
-    if (dual) {
-      applyDualTagColor(row, mode, dual.color1, dual.color2);
-    } else {
-      const tagIdx = findTagIndex(name);
-      if (tagIdx >= 0) {
-        applyRowColor(row, mode, getBotColor(SETTINGS_COLORS[tagIdx]), getTopColor(SETTINGS_TEXT[tagIdx]));
-      } else if (isSupport(row)) {
-        applyRowColor(row, mode, getBotColor("yellow"), "#000000");
-      } else {
-        applyRowColor(row, mode, getBotColor("red"), "#ffffff");
-      }
-    }
-    colorByVillageNote(row, mode);
-    const targetCell = findRenameCell(row);
-    if (!targetCell) {
-      row.setAttribute(PROCESSED_ATTR, "1");
-      return;
-    }
-    const group = document.createElement("span");
-    group.className = "ph-rc-group";
-    group.style.fontSize = `${FONT_SIZE}pt`;
-    for (let i = 0; i < PRESETS2.length; i++) {
-      const preset = PRESETS2[i];
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ph-rc-btn";
-      btn.textContent = preset.label;
-      btn.style.backgroundColor = getBotColor(preset.colorName);
-      btn.style.color = getTopColor(preset.textColorName);
-      btn.title = preset.tag;
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (row.hasAttribute(BUSY_ATTR)) return;
-        row.setAttribute(BUSY_ATTR, "1");
-        const currentName = getCommandName(row);
-        const newName = getNewName(currentName, preset.tag, preset.isAppend);
-        renameCommand(row, newName, () => {
-          row.removeAttribute(BUSY_ATTR);
-          row.removeAttribute(PROCESSED_ATTR);
-          row.querySelector(".ph-rc-group")?.remove();
-          clearRowColor(row);
-        });
-      });
-      group.appendChild(btn);
-    }
-    row.setAttribute(PROCESSED_ATTR, "1");
-    targetCell.appendChild(group);
-  }
-  function processAll(table, mode) {
-    table.querySelectorAll("tr").forEach((row) => processRow(row, mode));
-  }
-  function addMassButtons(th, table, mode) {
-    if (th.querySelector(".ph-rc-mass-group")) return;
-    const group = document.createElement("span");
-    group.className = "ph-rc-group ph-rc-mass-group";
-    group.style.fontSize = `${FONT_SIZE}pt`;
-    for (let i = 0; i < PRESETS2.length; i++) {
-      const preset = PRESETS2[i];
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ph-rc-btn";
-      btn.textContent = preset.label;
-      btn.style.backgroundColor = getBotColor(preset.colorName);
-      btn.style.color = getTopColor(preset.textColorName);
-      btn.title = `Renomear selecionados: ${preset.tag}`;
-      btn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const rows = Array.from(
-          table.querySelectorAll('input[type="checkbox"]:checked')
-        ).map((cb) => cb.closest("tr")).filter((r) => r !== null);
-        for (let j = 0; j < rows.length; j++) {
-          const row = rows[j];
-          if (row.hasAttribute(BUSY_ATTR)) continue;
-          row.setAttribute(BUSY_ATTR, "1");
-          const currentName = getCommandName(row);
-          const newName = getNewName(currentName, preset.tag, preset.isAppend);
-          row.removeAttribute(PROCESSED_ATTR);
-          row.querySelector(".ph-rc-group")?.remove();
-          clearRowColor(row);
-          renameCommand(row, newName, () => {
-            row.removeAttribute(BUSY_ATTR);
-          });
-          if (j < rows.length - 1) await delay2(200);
-        }
-      });
-      group.appendChild(btn);
-    }
-    th.appendChild(group);
-  }
-  function findSelectAllTh(table) {
-    const bar = document.getElementById("ignored_commands_bar");
-    if (bar) {
-      const th = bar.querySelector("th");
-      if (th) return th;
-    }
-    for (const th of Array.from(table.querySelectorAll("th"))) {
-      if (th.querySelector("input.selectAll")) return th;
-    }
-    return null;
-  }
   function delay2(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
-  function initUi3(table, mode = DEFAULT_COLORING_MODE) {
-    processAll(table, mode);
+  function initUi3(table, config) {
+    const presets = buildPresets(config);
+    const mode = config.coloringMode;
+    const fontSize = config.fontSize;
+    const noteColors = config.noteColors;
+    function processRow(row) {
+      if (row.hasAttribute(PROCESSED_ATTR)) return;
+      const tds = row.querySelectorAll("td");
+      if (tds.length === 0) return;
+      const name = getCommandName(row);
+      const dual = checkDualTag(name, presets);
+      if (dual) {
+        applyDualTagColor(row, mode, dual.color1, dual.color2);
+      } else {
+        const tagIdx = findTagIndex(name, presets);
+        if (tagIdx >= 0) {
+          applyRowColor(row, mode, getBotColor(presets[tagIdx].colorName), getTopColor(presets[tagIdx].textColorName));
+        } else if (isSupport(row)) {
+          applyRowColor(row, mode, getBotColor("yellow"), "#000000");
+        } else {
+          applyRowColor(row, mode, getBotColor("red"), "#ffffff");
+        }
+      }
+      colorByVillageNote(row, mode, noteColors);
+      const targetCell = findRenameCell(row);
+      if (!targetCell) {
+        row.setAttribute(PROCESSED_ATTR, "1");
+        return;
+      }
+      const group = document.createElement("span");
+      group.className = "ph-rc-group";
+      group.style.fontSize = `${fontSize}pt`;
+      for (let i = 0; i < presets.length; i++) {
+        const preset = presets[i];
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ph-rc-btn";
+        btn.textContent = preset.label;
+        btn.style.backgroundColor = getBotColor(preset.colorName);
+        btn.style.color = getTopColor(preset.textColorName);
+        btn.title = preset.tag;
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (row.hasAttribute(BUSY_ATTR)) return;
+          row.setAttribute(BUSY_ATTR, "1");
+          const currentName = getCommandName(row);
+          const newName = getNewName(currentName, preset.tag, preset.isAppend);
+          renameCommand(row, newName, () => {
+            row.removeAttribute(BUSY_ATTR);
+            row.removeAttribute(PROCESSED_ATTR);
+            row.querySelector(".ph-rc-group")?.remove();
+            clearRowColor(row);
+          });
+        });
+        group.appendChild(btn);
+      }
+      row.setAttribute(PROCESSED_ATTR, "1");
+      targetCell.appendChild(group);
+    }
+    function processAll(tbl) {
+      tbl.querySelectorAll("tr").forEach((row) => processRow(row));
+    }
+    function findSelectAllTh(tbl) {
+      const bar = document.getElementById("ignored_commands_bar");
+      if (bar) {
+        const th = bar.querySelector("th");
+        if (th) return th;
+      }
+      for (const th of Array.from(tbl.querySelectorAll("th"))) {
+        if (th.querySelector("input.selectAll")) return th;
+      }
+      return null;
+    }
+    function addMassButtons(th, tbl) {
+      if (th.querySelector(".ph-rc-mass-group")) return;
+      const group = document.createElement("span");
+      group.className = "ph-rc-group ph-rc-mass-group";
+      group.style.fontSize = `${fontSize}pt`;
+      for (let i = 0; i < presets.length; i++) {
+        const preset = presets[i];
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ph-rc-btn";
+        btn.textContent = preset.label;
+        btn.style.backgroundColor = getBotColor(preset.colorName);
+        btn.style.color = getTopColor(preset.textColorName);
+        btn.title = `Renomear selecionados: ${preset.tag}`;
+        btn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const rows = Array.from(
+            tbl.querySelectorAll('input[type="checkbox"]:checked')
+          ).map((cb) => cb.closest("tr")).filter((r) => r !== null);
+          for (let j = 0; j < rows.length; j++) {
+            const row = rows[j];
+            if (row.hasAttribute(BUSY_ATTR)) continue;
+            row.setAttribute(BUSY_ATTR, "1");
+            const currentName = getCommandName(row);
+            const newName = getNewName(currentName, preset.tag, preset.isAppend);
+            row.removeAttribute(PROCESSED_ATTR);
+            row.querySelector(".ph-rc-group")?.remove();
+            clearRowColor(row);
+            renameCommand(row, newName, () => {
+              row.removeAttribute(BUSY_ATTR);
+            });
+            if (j < rows.length - 1) await delay2(200);
+          }
+        });
+        group.appendChild(btn);
+      }
+      th.appendChild(group);
+    }
+    processAll(table);
     const selectAllTh = findSelectAllTh(table);
-    if (selectAllTh) addMassButtons(selectAllTh, table, mode);
+    if (selectAllTh) addMassButtons(selectAllTh, table);
     let debounce = null;
     let processing = false;
     const observer = new MutationObserver((mutations) => {
@@ -3155,8 +3198,8 @@ Aten\xE7\xE3o: substitui as notas existentes.`
         debounce = null;
         processing = true;
         try {
-          processAll(table, mode);
-          if (selectAllTh) addMassButtons(selectAllTh, table, mode);
+          processAll(table);
+          if (selectAllTh) addMassButtons(selectAllTh, table);
         } finally {
           processing = false;
         }
@@ -3179,19 +3222,272 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     };
   }
 
+  // src/modules/renomear-cores/ui-config.ts
+  function makeColorSelect(value) {
+    const sel = document.createElement("select");
+    sel.className = "ph-config-select ph-color-select";
+    for (const { name, hex } of SELECTABLE_COLORS) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      opt.style.background = hex;
+      opt.style.color = isLightHex(hex) ? "#000000" : "#ffffff";
+      if (name === value) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    return sel;
+  }
+  function isLightHex(hex) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (r * 299 + g * 587 + b * 114) / 1e3 > 128;
+  }
+  function deepCopyConfig(cfg) {
+    return {
+      tags: [...cfg.tags],
+      labels: [...cfg.labels],
+      colors: [...cfg.colors],
+      textColors: [...cfg.textColors],
+      noteColors: { ...cfg.noteColors },
+      coloringMode: cfg.coloringMode,
+      fontSize: cfg.fontSize
+    };
+  }
+  function renderConfigForm(container, initialConfig, callbacks) {
+    let working = deepCopyConfig(initialConfig);
+    const wrapper = document.createElement("div");
+    wrapper.className = "ph-config-form";
+    const globalSec = document.createElement("div");
+    globalSec.className = "ph-config-section";
+    const modeRow = document.createElement("div");
+    modeRow.className = "ph-config-row";
+    const modeLabel = document.createElement("label");
+    modeLabel.textContent = "Modo de colora\xE7\xE3o:";
+    const modeSelect = document.createElement("select");
+    modeSelect.className = "ph-config-select";
+    ["coluna", "linha", "nada"].forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m === "coluna" ? "Coluna (1\xAA c\xE9lula)" : m === "linha" ? "Linha inteira" : "Nenhuma";
+      opt.selected = m === working.coloringMode;
+      modeSelect.appendChild(opt);
+    });
+    modeSelect.addEventListener("change", () => {
+      working.coloringMode = modeSelect.value;
+    });
+    modeRow.append(modeLabel, modeSelect);
+    const fontRow = document.createElement("div");
+    fontRow.className = "ph-config-row";
+    const fontLabel = document.createElement("label");
+    fontLabel.textContent = "Tamanho da letra (pt):";
+    const fontInput = document.createElement("input");
+    fontInput.type = "number";
+    fontInput.min = "6";
+    fontInput.max = "16";
+    fontInput.value = String(working.fontSize);
+    fontInput.className = "ph-config-input ph-config-input-num";
+    fontInput.addEventListener("change", () => {
+      const v = parseInt(fontInput.value, 10);
+      if (Number.isFinite(v) && v >= 6 && v <= 16) working.fontSize = v;
+      else fontInput.value = String(working.fontSize);
+    });
+    fontRow.append(fontLabel, fontInput);
+    globalSec.append(modeRow, fontRow);
+    const presetSec = document.createElement("div");
+    presetSec.className = "ph-config-section";
+    const presetTitle = document.createElement("div");
+    presetTitle.className = "ph-config-section-title";
+    presetTitle.textContent = "Predefini\xE7\xF5es (18 ataques)";
+    presetSec.appendChild(presetTitle);
+    const tbl = document.createElement("table");
+    tbl.className = "ph-config-presets-table";
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    ["#", "Tag completa", "Bot\xE3o", "Cor fundo", "Cor texto"].forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    const tbody = document.createElement("tbody");
+    const colorSelects = [];
+    const tagInputs = [];
+    const labelInputs = [];
+    for (let i = 0; i < working.tags.length; i++) {
+      const tr = document.createElement("tr");
+      const tdNum = document.createElement("td");
+      tdNum.textContent = String(i + 1);
+      const tdTag = document.createElement("td");
+      const tagInput = document.createElement("input");
+      tagInput.type = "text";
+      tagInput.className = "ph-config-input ph-config-input-tag";
+      tagInput.value = working.tags[i] ?? "";
+      const capturedIdx = i;
+      tagInput.addEventListener("change", () => {
+        working.tags[capturedIdx] = tagInput.value;
+      });
+      tdTag.appendChild(tagInput);
+      tagInputs.push(tagInput);
+      const tdLbl = document.createElement("td");
+      const labelInput = document.createElement("input");
+      labelInput.type = "text";
+      labelInput.className = "ph-config-input ph-config-input-label";
+      labelInput.value = working.labels[i] ?? "";
+      labelInput.addEventListener("change", () => {
+        working.labels[capturedIdx] = labelInput.value;
+      });
+      tdLbl.appendChild(labelInput);
+      labelInputs.push(labelInput);
+      const tdBg = document.createElement("td");
+      const bgSel = makeColorSelect(working.colors[i] ?? "white");
+      bgSel.style.background = getBotColor(working.colors[i] ?? "white");
+      bgSel.addEventListener("change", () => {
+        working.colors[capturedIdx] = bgSel.value;
+        bgSel.style.background = getBotColor(bgSel.value);
+      });
+      tdBg.appendChild(bgSel);
+      const tdText = document.createElement("td");
+      const textSel = makeColorSelect(working.textColors[i] ?? "black");
+      textSel.style.background = getTopColor(working.textColors[i] ?? "black");
+      textSel.addEventListener("change", () => {
+        working.textColors[capturedIdx] = textSel.value;
+        textSel.style.background = getTopColor(textSel.value);
+      });
+      tdText.appendChild(textSel);
+      colorSelects.push({ bg: bgSel, text: textSel });
+      tr.append(tdNum, tdTag, tdLbl, tdBg, tdText);
+      tbody.appendChild(tr);
+    }
+    tbl.append(thead, tbody);
+    presetSec.appendChild(tbl);
+    const noteSec = document.createElement("div");
+    noteSec.className = "ph-config-section";
+    const noteTitle = document.createElement("div");
+    noteTitle.className = "ph-config-section-title";
+    noteTitle.textContent = "Cores das notas de aldeia";
+    noteSec.appendChild(noteTitle);
+    const ataqueRow = document.createElement("div");
+    ataqueRow.className = "ph-config-row";
+    const ataqueLabel = document.createElement("label");
+    ataqueLabel.textContent = "Ataque / Ofensiva:";
+    const ataqueSel = makeColorSelect(working.noteColors.ataque);
+    ataqueSel.addEventListener("change", () => {
+      working.noteColors.ataque = ataqueSel.value;
+    });
+    ataqueRow.append(ataqueLabel, ataqueSel);
+    const defesaRow = document.createElement("div");
+    defesaRow.className = "ph-config-row";
+    const defesaLabel = document.createElement("label");
+    defesaLabel.textContent = "Defesa / Defensiva:";
+    const defesaSel = makeColorSelect(working.noteColors.defesa);
+    defesaSel.addEventListener("change", () => {
+      working.noteColors.defesa = defesaSel.value;
+    });
+    defesaRow.append(defesaLabel, defesaSel);
+    noteSec.append(ataqueRow, defesaRow);
+    const actions = document.createElement("div");
+    actions.className = "ph-config-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "ph-btn ph-btn-primary";
+    saveBtn.textContent = "Salvar";
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.className = "ph-btn";
+    resetBtn.textContent = "Restaurar padr\xE3o";
+    const status = document.createElement("span");
+    status.className = "ph-config-status";
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      status.textContent = "A guardar...";
+      status.className = "ph-config-status";
+      try {
+        await callbacks.onSave(deepCopyConfig(working));
+        status.textContent = "Guardado! Recarregue a p\xE1gina para aplicar.";
+        status.className = "ph-config-status ph-config-status-ok";
+      } catch {
+        status.textContent = "Erro ao guardar.";
+        status.className = "ph-config-status ph-config-status-err";
+      } finally {
+        saveBtn.disabled = false;
+        setTimeout(() => {
+          status.textContent = "";
+        }, 4e3);
+      }
+    });
+    resetBtn.addEventListener("click", () => {
+      working = deepCopyConfig(DEFAULTS);
+      modeSelect.value = working.coloringMode;
+      fontInput.value = String(working.fontSize);
+      ataqueSel.value = working.noteColors.ataque;
+      defesaSel.value = working.noteColors.defesa;
+      for (let i = 0; i < working.tags.length; i++) {
+        if (tagInputs[i]) tagInputs[i].value = working.tags[i] ?? "";
+        if (labelInputs[i]) labelInputs[i].value = working.labels[i] ?? "";
+        if (colorSelects[i]) {
+          const bgVal = working.colors[i] ?? "white";
+          const textVal = working.textColors[i] ?? "black";
+          colorSelects[i].bg.value = bgVal;
+          colorSelects[i].text.value = textVal;
+          colorSelects[i].bg.style.background = getBotColor(bgVal);
+          colorSelects[i].text.style.background = getTopColor(textVal);
+        }
+      }
+      status.textContent = "Padr\xE3o restaurado. Clique Salvar para confirmar.";
+      status.className = "ph-config-status";
+      setTimeout(() => {
+        status.textContent = "";
+      }, 3e3);
+    });
+    actions.append(saveBtn, resetBtn, status);
+    wrapper.append(globalSec, presetSec, noteSec, actions);
+    container.appendChild(wrapper);
+    return function destroy() {
+      wrapper.remove();
+    };
+  }
+
   // src/modules/renomear-cores/index.ts
+  var STORAGE_KEY = "renomear-cores:config";
   var destroyUi = null;
+  var destroyConfig = null;
+  function findTable() {
+    const t1 = document.getElementById("incomings_table");
+    if (t1) return t1;
+    const t2 = document.getElementById("commands_incomings");
+    if (t2) return t2;
+    return null;
+  }
   var renomearCoresModule = {
     manifest: manifest3,
-    init(ctx) {
-      const table = document.getElementById("incomings_table");
-      if (!table) {
-        ctx.services.logger.info("incomings_table not found on this screen \u2014 skipping");
+    async init(ctx) {
+      const storage = ctx.services.storage;
+      const stored = storage ? await storage.get(STORAGE_KEY) : void 0;
+      const config = stored ?? DEFAULTS;
+      if (ctx.hubContent) {
+        destroyConfig?.();
+        destroyConfig = renderConfigForm(ctx.hubContent, config, {
+          onSave: async (cfg) => {
+            await storage?.set(STORAGE_KEY, cfg);
+          }
+        });
         return;
       }
-      destroyUi = initUi3(table);
+      const table = findTable();
+      if (!table) {
+        ctx.services.logger.info("renomear-cores: no incomings table found on this screen");
+        return;
+      }
+      destroyUi?.();
+      destroyUi = initUi3(table, config);
+    },
+    disposeUi() {
+      destroyConfig?.();
+      destroyConfig = null;
     },
     destroy() {
+      this.disposeUi?.();
       destroyUi?.();
       destroyUi = null;
     }
@@ -3716,8 +4012,8 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   }
 
   // src/modules/auto-res-sender/ui.ts
-  async function initUi4(ctx, contentEl, service2) {
-    const config = await service2.loadConfig();
+  async function initUi4(ctx, contentEl, service3) {
+    const config = await service3.loadConfig();
     const root = document.createElement("div");
     root.className = "ph-ars";
     const destinations = document.createElement("div");
@@ -3795,7 +4091,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     save.addEventListener("click", async () => {
       save.disabled = true;
       status.textContent = "";
-      await service2.saveConfig(readConfig());
+      await service3.saveConfig(readConfig());
       status.textContent = "Guardado. A recarregar...";
       window.location.reload();
     });
@@ -3909,6 +4205,316 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   };
   var auto_res_sender_default = autoResSenderModule;
 
+  // src/modules/auto-renomear/manifest.ts
+  var manifest5 = {
+    id: "auto-renomear",
+    name: "Auto Renomear Ataques",
+    version: "1.0.0",
+    category: "kit-defesa",
+    subcategory: "Comandos",
+    activation: "background",
+    allowedScreens: ["*"],
+    icon: "\u{1F50E}",
+    description: "Etiqueta automaticamente todos os ataques recebidos num intervalo fixo",
+    surface: "config",
+    defaultEnabled: false
+  };
+
+  // src/modules/auto-renomear/constants.ts
+  var AUTO_RENOMEAR_DEFAULTS = {
+    intervalMs: 5 * 60 * 1e3,
+    // 5 minutes — fixed, no randomness
+    groupId: 0
+    // group=0 = all attacks
+  };
+
+  // src/modules/auto-renomear/service.ts
+  var AutoRenomearService = class {
+    constructor(ctx, config) {
+      this.started = false;
+      this.ctx = ctx;
+      this.config = config;
+    }
+    async start() {
+      if (this.started) return;
+      this.started = true;
+      this.ctx.services.keepAlive?.acquire("auto-renomear");
+      await this.ctx.services.scheduler.register({
+        id: "auto-renomear",
+        interval: this.config.intervalMs,
+        run: () => this.runCycle()
+      });
+    }
+    async stop() {
+      if (!this.started) return;
+      this.started = false;
+      await this.ctx.services.scheduler?.unregister("auto-renomear");
+      this.ctx.services.keepAlive?.release("auto-renomear");
+    }
+    getRemaining() {
+      return this.ctx.services.scheduler?.getRemaining("auto-renomear") ?? 0;
+    }
+    isRunning() {
+      return this.started;
+    }
+    async runCycle() {
+      const gd = this.ctx.services.gameData.snapshot();
+      if (!gd) return;
+      const logger = this.ctx.services.logger;
+      this.ctx.eventBus.emit("monitor:auto-renomear", {
+        status: "running",
+        message: "A etiquetar ataques..."
+      });
+      try {
+        const url = this.buildUrl(gd.village.id, gd.world);
+        const html = await this.fetchPage(url);
+        if (!html) {
+          logger.warn("auto-renomear: falhou ao obter p\xE1gina de ataques");
+          return;
+        }
+        const parsed = this.parseForm(html, url);
+        if (!parsed) {
+          logger.info("auto-renomear: nenhum formul\xE1rio de ataques encontrado (provavelmente sem ataques)");
+          this.ctx.eventBus.emit("monitor:auto-renomear", {
+            status: "scheduled",
+            badge: 0,
+            message: "Sem ataques para etiquetar.",
+            nextCycle: Date.now() + this.config.intervalMs
+          });
+          return;
+        }
+        if (parsed.commandCount === 0) {
+          logger.info("auto-renomear: 0 ataques encontrados");
+          this.ctx.eventBus.emit("monitor:auto-renomear", {
+            status: "scheduled",
+            badge: 0,
+            message: "Sem ataques para etiquetar.",
+            nextCycle: Date.now() + this.config.intervalMs
+          });
+          return;
+        }
+        await this.submitForm(parsed);
+        logger.info(`auto-renomear: ${parsed.commandCount} ataques etiquetados`);
+        this.ctx.eventBus.emit("monitor:auto-renomear", {
+          status: "scheduled",
+          badge: parsed.commandCount,
+          message: `${parsed.commandCount} ataques etiquetados.`,
+          nextCycle: Date.now() + this.config.intervalMs
+        });
+      } catch (err) {
+        logger.warn("auto-renomear: erro no ciclo:", err);
+        this.ctx.eventBus.emit("monitor:auto-renomear", {
+          status: "scheduled",
+          message: "Erro no \xFAltimo ciclo.",
+          nextCycle: Date.now() + this.config.intervalMs
+        });
+      }
+    }
+    buildUrl(villageId, world) {
+      const url = new URL("/game.php", window.location.origin);
+      url.searchParams.set("village", villageId);
+      url.searchParams.set("screen", "overview_villages");
+      url.searchParams.set("mode", "incomings");
+      url.searchParams.set("subtype", "attacks");
+      url.searchParams.set("group", String(this.config.groupId));
+      return url.toString();
+    }
+    async fetchPage(url) {
+      try {
+        const resp = await fetch(url, { credentials: "same-origin" });
+        if (!resp.ok) return null;
+        return await resp.text();
+      } catch {
+        return null;
+      }
+    }
+    parseForm(html, pageUrl) {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const form = doc.getElementById("incomings_form");
+      if (!form) return null;
+      const hInput = form.querySelector('input[name="h"]');
+      if (!hInput?.value) return null;
+      const ids = Array.from(
+        form.querySelectorAll('input[name^="id_"]')
+      ).map((el) => el.name);
+      const labelEl = form.querySelector('input[name="label"]') ?? form.querySelector('button[name="label"]');
+      const rawAction = form.getAttribute("action") ?? "";
+      const absoluteAction = rawAction ? new URL(rawAction, pageUrl).toString() : pageUrl;
+      return {
+        action: absoluteAction,
+        h: hInput.value,
+        ids,
+        labelName: labelEl?.name ?? "label",
+        labelValue: labelEl?.value ?? "1",
+        commandCount: ids.length
+      };
+    }
+    async submitForm(parsed) {
+      const body = new URLSearchParams();
+      body.set("h", parsed.h);
+      for (const id of parsed.ids) body.set(id, "on");
+      body.set(parsed.labelName, parsed.labelValue);
+      await fetch(parsed.action, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      });
+    }
+  };
+
+  // src/modules/auto-renomear/ui.ts
+  function formatMs(ms) {
+    const s = Math.round(ms / 1e3);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}m${rem > 0 ? ` ${rem}s` : ""}`;
+  }
+  function initUi5(container, initialConfig, service3, callbacks) {
+    let working = { ...initialConfig };
+    const wrapper = document.createElement("div");
+    wrapper.className = "ph-config-form";
+    const statusSec = document.createElement("div");
+    statusSec.className = "ph-config-section";
+    const statusTitle = document.createElement("div");
+    statusTitle.className = "ph-config-section-title";
+    statusTitle.textContent = "Estado";
+    statusSec.appendChild(statusTitle);
+    const statusRow = document.createElement("div");
+    statusRow.className = "ph-config-row";
+    const runningLabel = document.createElement("span");
+    runningLabel.textContent = service3.isRunning() ? "Em execu\xE7\xE3o" : "Inativo";
+    runningLabel.className = `ph-status-pill ${service3.isRunning() ? "running" : "idle"}`;
+    const remainingEl = document.createElement("span");
+    remainingEl.className = "ph-mon-timer";
+    const rem = service3.getRemaining();
+    remainingEl.textContent = rem > 0 ? `Pr\xF3ximo ciclo em ${formatMs(rem)}` : "";
+    statusRow.append(runningLabel, remainingEl);
+    statusSec.appendChild(statusRow);
+    const settingsSec = document.createElement("div");
+    settingsSec.className = "ph-config-section";
+    const settingsTitle = document.createElement("div");
+    settingsTitle.className = "ph-config-section-title";
+    settingsTitle.textContent = "Configura\xE7\xF5es";
+    settingsSec.appendChild(settingsTitle);
+    const intervalRow = document.createElement("div");
+    intervalRow.className = "ph-config-row";
+    const intervalLabel = document.createElement("label");
+    intervalLabel.textContent = "Intervalo entre ciclos (minutos):";
+    const intervalInput = document.createElement("input");
+    intervalInput.type = "number";
+    intervalInput.min = "1";
+    intervalInput.max = "60";
+    intervalInput.value = String(Math.round(working.intervalMs / 6e4));
+    intervalInput.className = "ph-config-input ph-config-input-num";
+    intervalInput.addEventListener("change", () => {
+      const v = parseInt(intervalInput.value, 10);
+      if (Number.isFinite(v) && v >= 1 && v <= 60) working.intervalMs = v * 6e4;
+      else intervalInput.value = String(Math.round(working.intervalMs / 6e4));
+    });
+    intervalRow.append(intervalLabel, intervalInput);
+    const groupRow = document.createElement("div");
+    groupRow.className = "ph-config-row";
+    const groupLabel = document.createElement("label");
+    groupLabel.textContent = "Grupo de ataques:";
+    const groupSelect = document.createElement("select");
+    groupSelect.className = "ph-config-select";
+    const opt0 = document.createElement("option");
+    opt0.value = "0";
+    opt0.textContent = "Todos os ataques (group=0)";
+    opt0.selected = working.groupId === 0;
+    groupSelect.appendChild(opt0);
+    groupSelect.addEventListener("change", () => {
+      working.groupId = parseInt(groupSelect.value, 10);
+    });
+    groupRow.append(groupLabel, groupSelect);
+    settingsSec.append(intervalRow, groupRow);
+    const actions = document.createElement("div");
+    actions.className = "ph-config-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "ph-btn ph-btn-primary";
+    saveBtn.textContent = "Salvar";
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.className = "ph-btn";
+    resetBtn.textContent = "Restaurar padr\xE3o";
+    const status = document.createElement("span");
+    status.className = "ph-config-status";
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      status.textContent = "A guardar...";
+      status.className = "ph-config-status";
+      try {
+        await callbacks.onSave({ ...working });
+        status.textContent = "Guardado! Novas configura\xE7\xF5es aplicam-se no pr\xF3ximo ciclo.";
+        status.className = "ph-config-status ph-config-status-ok";
+      } catch {
+        status.textContent = "Erro ao guardar.";
+        status.className = "ph-config-status ph-config-status-err";
+      } finally {
+        saveBtn.disabled = false;
+        setTimeout(() => {
+          status.textContent = "";
+        }, 4e3);
+      }
+    });
+    resetBtn.addEventListener("click", () => {
+      working = { ...AUTO_RENOMEAR_DEFAULTS };
+      intervalInput.value = String(Math.round(working.intervalMs / 6e4));
+      groupSelect.value = String(working.groupId);
+      status.textContent = "Padr\xE3o restaurado. Clique Salvar para confirmar.";
+      status.className = "ph-config-status";
+      setTimeout(() => {
+        status.textContent = "";
+      }, 3e3);
+    });
+    actions.append(saveBtn, resetBtn, status);
+    wrapper.append(statusSec, settingsSec, actions);
+    container.appendChild(wrapper);
+    return {
+      destroy() {
+        wrapper.remove();
+      }
+    };
+  }
+
+  // src/modules/auto-renomear/index.ts
+  var STORAGE_KEY2 = "auto-renomear:config";
+  var service2 = null;
+  var cleanupUi4 = null;
+  var autoRenomearModule = {
+    manifest: manifest5,
+    async init(ctx) {
+      const storage = ctx.services.storage;
+      const stored = storage ? await storage.get(STORAGE_KEY2) : void 0;
+      const config = stored ?? AUTO_RENOMEAR_DEFAULTS;
+      if (!service2) service2 = new AutoRenomearService(ctx, config);
+      if (ctx.hubContent) {
+        cleanupUi4?.();
+        const ui = initUi5(ctx.hubContent, config, service2, {
+          onSave: async (cfg) => {
+            await storage?.set(STORAGE_KEY2, cfg);
+          }
+        });
+        cleanupUi4 = ui.destroy;
+        return;
+      }
+      await service2.start();
+    },
+    disposeUi() {
+      cleanupUi4?.();
+      cleanupUi4 = null;
+    },
+    destroy() {
+      this.disposeUi?.();
+      void service2?.stop();
+      service2 = null;
+    }
+  };
+  var auto_renomear_default = autoRenomearModule;
+
   // src/bootstrap.ts
   async function boot() {
     const gameData = createGameDataService();
@@ -3933,6 +4539,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
     registry.register(notas_manuais_default);
     registry.register(renomear_cores_default);
     registry.register(auto_res_sender_default);
+    registry.register(auto_renomear_default);
     await bootShell(registry, services, state, eventBus, gd.screen);
   }
   void boot();
