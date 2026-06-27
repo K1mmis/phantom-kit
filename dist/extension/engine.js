@@ -791,9 +791,26 @@
       gap: 10px;
     }
     .ph-profile-avatar {
-      font-size: 28px;
+      width: 54px;
+      height: 54px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--ph-radius);
+      background: var(--ph-surface-alt);
+      color: var(--ph-text-2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 16px;
       line-height: 1;
+      overflow: hidden;
       flex-shrink: 0;
+    }
+    .ph-profile-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
     }
     .ph-profile-info { min-width: 0; flex: 1; }
     .ph-profile-name {
@@ -803,6 +820,11 @@
       margin-bottom: 2px;
     }
     .ph-profile-meta {
+      font-size: 10px;
+      color: var(--ph-text-2);
+      line-height: 1.6;
+    }
+    .ph-profile-stats {
       font-size: 10px;
       color: var(--ph-text-2);
       line-height: 1.6;
@@ -1401,17 +1423,17 @@
     "alertas": "Alertas"
   };
   var CATEGORY_ICONS = {
-    "scripts-aldeia": "\u{1F3E0}",
-    "farm-buscas": "\u{1F33E}",
-    "kit-ataque": "\u2694",
-    "kit-defesa": "\u{1F6E1}",
-    "cunhagem": "\u{1FA99}",
-    "notas-relatorios": "\u{1F4DD}",
-    "mapa": "\u{1F5FA}",
-    "tribo": "\u{1F3F0}",
-    "utilidades": "\u{1F527}",
-    "captcha": "\u{1F510}",
-    "alertas": "\u{1F514}"
+    "scripts-aldeia": "SA",
+    "farm-buscas": "FB",
+    "kit-ataque": "KA",
+    "kit-defesa": "KD",
+    "cunhagem": "CU",
+    "notas-relatorios": "NR",
+    "mapa": "MP",
+    "tribo": "TR",
+    "utilidades": "UT",
+    "captcha": "CP",
+    "alertas": "AL"
   };
   var CATEGORY_ORDER = [
     "scripts-aldeia",
@@ -1437,6 +1459,7 @@
     let stripCollapsed = false;
     const monitorDetails = /* @__PURE__ */ new Map();
     const monitorUnsubs = [];
+    let profileDetails = null;
     for (const m of modules) localEnabled.set(m.id, enabledState[m.id] ?? true);
     for (const m of modules) {
       const key = `monitor:${m.id}`;
@@ -1487,7 +1510,7 @@
     closeBtn.className = "ph-hub-close";
     closeBtn.type = "button";
     closeBtn.title = "Fechar";
-    closeBtn.textContent = "\xC3\u2014";
+    closeBtn.textContent = "x";
     closeBtn.addEventListener("click", () => overlay.classList.add("ph-hidden"));
     header.append(brand, titleBlock, closeBtn);
     hub.appendChild(header);
@@ -1516,7 +1539,7 @@
       navItems.set(key, el);
       return el;
     };
-    sidebar.appendChild(makeNavItem("\xF0\u0178\u2018\xBB", "In\xC3\xADcio", "home", () => navigate({ view: "home" })));
+    sidebar.appendChild(makeNavItem("PH", "Inicio", "home", () => navigate({ view: "home" })));
     const sep = document.createElement("div");
     sep.className = "ph-nav-sep";
     sidebar.appendChild(sep);
@@ -1532,7 +1555,7 @@
     const automationSep = document.createElement("div");
     automationSep.className = "ph-nav-sep ph-nav-sep-automation";
     sidebar.appendChild(automationSep);
-    sidebar.appendChild(makeNavItem("\u2699", "Automa\xE7\xE3o", AUTOMATION_NAV_KEY, () => navigate({ view: "automation" })));
+    sidebar.appendChild(makeNavItem("WF", "Automacao", AUTOMATION_NAV_KEY, () => navigate({ view: "automation" })));
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) overlay.classList.add("ph-hidden");
     });
@@ -1553,16 +1576,21 @@
     stripCollapse.type = "button";
     stripCollapse.className = "ph-strip-item ph-strip-collapse";
     stripCollapse.title = "Recolher categorias";
-    stripCollapse.textContent = "\u2039";
+    stripCollapse.textContent = "<";
     stripCollapse.addEventListener("click", () => {
       stripCollapsed = !stripCollapsed;
-      stripCollapse.textContent = stripCollapsed ? "\u203A" : "\u2039";
+      stripCollapse.textContent = stripCollapsed ? ">" : "<";
       stripCollapse.title = stripCollapsed ? "Mostrar categorias" : "Recolher categorias";
       updateStrip();
     });
     strip.appendChild(stripCollapse);
     const stripCatIcons = /* @__PURE__ */ new Map();
     document.body.appendChild(strip);
+    void loadProfileDetails().then((details) => {
+      if (!details || destroyed) return;
+      profileDetails = details;
+      if (router.view === "home") renderContent();
+    });
     function navigate(next) {
       if (router.view === "module" && next.view !== "module") {
         callbacks.onCloseModule(router.moduleId);
@@ -1601,20 +1629,32 @@
       card.className = "ph-profile-card";
       const avatar = document.createElement("div");
       avatar.className = "ph-profile-avatar";
-      avatar.textContent = "\xF0\u0178\u2018\xA4";
+      if (profileDetails?.imageUrl) {
+        const avatarImg = document.createElement("img");
+        avatarImg.src = profileDetails.imageUrl;
+        avatarImg.alt = gameData?.player.name ?? "Perfil";
+        avatar.appendChild(avatarImg);
+      } else {
+        avatar.textContent = initials(gameData?.player.name);
+      }
       const info = document.createElement("div");
       info.className = "ph-profile-info";
       const nameEl = document.createElement("div");
       nameEl.className = "ph-profile-name";
-      nameEl.textContent = gameData?.player.name ?? "\xE2\u20AC\u201D";
+      nameEl.textContent = gameData?.player.name ?? "-";
       const meta = document.createElement("div");
       meta.className = "ph-profile-meta";
       const tribe = gameData?.player.ally_tag ? `[${gameData.player.ally_tag}]` : "Sem tribo";
-      meta.innerHTML = `Mundo: <b>${gameData?.world ?? "\xE2\u20AC\u201D"}</b> &nbsp;\xC2\xB7&nbsp; Tribo: <b>${tribe}</b>`;
+      meta.innerHTML = `Mundo: <b>${gameData?.world ?? "-"}</b> &nbsp;-&nbsp; Tribo: <b>${tribe}</b>`;
+      const stats = document.createElement("div");
+      stats.className = "ph-profile-stats";
+      const points = profileDetails?.points;
+      const rank = profileDetails?.rank;
+      stats.innerHTML = `Pontos: <b>${points ?? "-"}</b> &nbsp;-&nbsp; Classificacao: <b>${rank ?? "-"}</b>`;
       const pill = document.createElement("div");
       pill.className = "ph-profile-pill";
       pill.textContent = "Ativo";
-      info.append(nameEl, meta, pill);
+      info.append(nameEl, meta, stats, pill);
       card.append(avatar, info);
       view.appendChild(card);
       const heading = document.createElement("div");
@@ -1629,7 +1669,7 @@
       if (autoMods.length === 0) {
         const empty = document.createElement("div");
         empty.className = "ph-monitor-empty";
-        empty.textContent = "Nenhum m\xC3\xB3dulo autom\xC3\xA1tico ativo neste ecr\xC3\xA3.";
+        empty.textContent = "Nenhum modulo automatico ativo neste ecra.";
         monitor.appendChild(empty);
       } else {
         if (bgMods.length > 0) {
@@ -1642,7 +1682,7 @@
         if (pageMods.length > 0) {
           const grpLabel = document.createElement("div");
           grpLabel.className = "ph-monitor-group-label";
-          grpLabel.textContent = "Scripts de p\xC3\xA1gina";
+          grpLabel.textContent = "Scripts de pagina";
           monitor.appendChild(grpLabel);
           for (const m of pageMods) monitor.appendChild(makeMonitorRow(m));
         }
@@ -1655,7 +1695,7 @@
       row.className = "ph-monitor-row";
       const icon = document.createElement("span");
       icon.className = "ph-mon-icon";
-      icon.textContent = m.icon;
+      icon.textContent = safeIcon(m.icon, m.name);
       const name = document.createElement("span");
       name.className = "ph-mon-name";
       name.textContent = m.name;
@@ -1683,7 +1723,7 @@
       timerEl.className = "ph-mon-timer";
       if (m.activation === "background" && isActive) {
         const remaining = details?.nextCycle ? Math.max(0, details.nextCycle - Date.now()) : scheduler?.getRemaining(m.id) ?? 0;
-        timerEl.textContent = remaining > 0 ? formatDuration(remaining) : "\u2014";
+        timerEl.textContent = remaining > 0 ? formatDuration(remaining) : "-";
       }
       const summary = document.createElement("div");
       summary.className = "ph-mon-summary";
@@ -1797,7 +1837,7 @@
           const row = document.createElement("div");
           row.className = "ph-workflow-row";
           const icon = document.createElement("span");
-          icon.textContent = m.icon;
+          icon.textContent = safeIcon(m.icon, m.name);
           const name = document.createElement("span");
           name.textContent = m.name;
           const meta = document.createElement("span");
@@ -1816,7 +1856,7 @@
       main.className = "ph-mod-row-main";
       const iconEl = document.createElement("span");
       iconEl.className = "ph-mod-row-icon";
-      iconEl.textContent = m.icon;
+      iconEl.textContent = safeIcon(m.icon, m.name);
       const text = document.createElement("div");
       text.className = "ph-mod-row-text";
       const nameEl = document.createElement("div");
@@ -1825,7 +1865,7 @@
       if (m.description) nameEl.title = m.description;
       const metaEl = document.createElement("div");
       metaEl.className = "ph-mod-row-meta";
-      metaEl.textContent = m.activation + (m.surface ? " \xC2\xB7 " + (m.surface === "tool" ? "ferramenta" : "configur\xC3\xA1vel") : "");
+      metaEl.textContent = m.activation + (m.surface ? " - " + (m.surface === "tool" ? "ferramenta" : "configuravel") : "");
       text.append(nameEl, metaEl);
       main.append(iconEl, text);
       const controls = document.createElement("div");
@@ -1848,7 +1888,7 @@
       const toggle = document.createElement("input");
       toggle.type = "checkbox";
       toggle.className = "ph-toggle";
-      toggle.title = localEnabled.get(m.id) ? "Desativar m\xC3\xB3dulo" : "Ativar m\xC3\xB3dulo";
+      toggle.title = localEnabled.get(m.id) ? "Desativar modulo" : "Ativar modulo";
       toggle.checked = localEnabled.get(m.id) ?? true;
       toggle.addEventListener("change", () => {
         const enabled = toggle.checked;
@@ -1874,7 +1914,7 @@
       const backBtn = document.createElement("button");
       backBtn.type = "button";
       backBtn.className = "ph-sub-back";
-      backBtn.textContent = "\xE2\u2020\x90 Voltar";
+      backBtn.textContent = "< Voltar";
       backBtn.addEventListener("click", () => navigate({ view: "category", cat }));
       const titleEl2 = document.createElement("span");
       titleEl2.className = "ph-sub-title";
@@ -1960,6 +2000,50 @@
       values.add("Buscas");
     }
     return Array.from(values);
+  }
+  function safeIcon(icon, label) {
+    return /^[\x20-\x7E]{1,3}$/.test(icon) ? icon : initials(label);
+  }
+  function initials(label) {
+    const parts = (label ?? "P").split(/\s+/).map((part) => part.trim()).filter(Boolean);
+    const text = (parts[0]?.[0] ?? "P") + (parts[1]?.[0] ?? "");
+    return text.toUpperCase();
+  }
+  async function loadProfileDetails() {
+    const playerId = window.game_data?.player?.id;
+    if (!playerId) return null;
+    const url = new URL("/game.php", window.location.origin);
+    const villageId = window.game_data?.village?.id;
+    if (villageId) url.searchParams.set("village", String(villageId));
+    url.searchParams.set("screen", "info_player");
+    url.searchParams.set("id", String(playerId));
+    const res = await fetch(url.toString(), { credentials: "same-origin" });
+    if (!res.ok) return null;
+    const html = await res.text();
+    return parseProfileDetails(html);
+  }
+  function parseProfileDetails(html) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const playerInfo = doc.querySelector("#player_info");
+    const image = playerInfo?.querySelector('td[colspan="2"][align="center"] img, img[alt="Imagem pessoal"]');
+    const details = {
+      imageUrl: image?.src
+    };
+    playerInfo?.querySelectorAll("tr").forEach((row) => {
+      const cells = row.querySelectorAll("td");
+      if (cells.length < 2) return;
+      const label = normalizeLabel(cells[0]?.textContent);
+      const value = cleanText(cells[1]?.textContent);
+      if (label.startsWith("pontos")) details.points = value;
+      if (label.startsWith("classifica")) details.rank = value;
+    });
+    return details;
+  }
+  function normalizeLabel(text) {
+    return cleanText(text).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+  function cleanText(text) {
+    return (text ?? "").replace(/\s+/g, " ").trim();
   }
 
   // src/core/shell.ts
