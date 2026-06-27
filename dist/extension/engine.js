@@ -41,7 +41,10 @@
   function getGameData() {
     const raw = window.game_data;
     if (!raw || typeof raw.screen !== "string") return null;
-    return JSON.parse(JSON.stringify(raw));
+    const gd = JSON.parse(JSON.stringify(raw));
+    const rawSitter = gd.player.sitter;
+    gd.player.sitter = rawSitter ? parseInt(String(rawSitter), 10) || 0 : 0;
+    return gd;
   }
 
   // src/game/screen.ts
@@ -54,7 +57,7 @@
     const modules = /* @__PURE__ */ new Map();
     const active = /* @__PURE__ */ new Set();
     const pending = /* @__PURE__ */ new Set();
-    function buildContext(module) {
+    function buildContext(module, hubContent) {
       return {
         state: shared.state,
         eventBus: shared.eventBus,
@@ -63,7 +66,8 @@
           // Each module gets a logger scoped to its own id
           logger: shared.services.logger.scoped(module.manifest.id)
         },
-        manifest: module.manifest
+        manifest: module.manifest,
+        hubContent
       };
     }
     return {
@@ -75,13 +79,13 @@
       available(screen) {
         return Array.from(modules.values()).filter((m) => matchesScreen(m.manifest.allowedScreens, screen)).map((m) => m.manifest);
       },
-      async activate(id) {
+      async activate(id, hubContent) {
         if (active.has(id) || pending.has(id)) return;
         const module = modules.get(id);
         if (!module) return;
         pending.add(id);
         try {
-          await module.init(buildContext(module));
+          await module.init(buildContext(module, hubContent));
           active.add(id);
         } finally {
           pending.delete(id);
@@ -396,18 +400,21 @@
 
   // src/services/request.ts
   function createRequestService(gameData) {
+    function sitterParam(gd) {
+      return gd.player.sitter > 0 ? gd.player.id : void 0;
+    }
     function buildUrl(opts) {
       const gd = gameData.snapshot();
       const village = opts.village ?? gd?.village.id ?? "";
       const csrf = gd?.csrf ?? "";
-      const sitter = gd?.player.sitter;
+      const t = gd ? sitterParam(gd) : void 0;
       const url = new URL("/game.php", window.location.origin);
       url.searchParams.set("village", String(village));
       url.searchParams.set("screen", opts.screen);
       url.searchParams.set("action", opts.action);
       url.searchParams.set("h", csrf);
       url.searchParams.set("ajax", "1");
-      if (sitter) url.searchParams.set("t", String(sitter));
+      if (t) url.searchParams.set("t", t);
       return url.toString();
     }
     return {
@@ -426,20 +433,117 @@
       editVillageNote(currentVillageId, targetVillageId, note) {
         const gd = gameData.snapshot();
         const csrf = gd?.csrf ?? "";
-        const sitter = gd?.player.sitter;
+        const t = gd ? sitterParam(gd) : void 0;
         const url = new URL("/game.php", window.location.origin);
         url.searchParams.set("village", currentVillageId);
         url.searchParams.set("screen", "info_village");
         url.searchParams.set("id", targetVillageId);
         url.searchParams.set("ajaxaction", "edit_notes");
         url.searchParams.set("h", csrf);
-        if (sitter) url.searchParams.set("t", String(sitter));
+        if (t) url.searchParams.set("t", t);
         return fetch(url.toString(), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ note })
         });
+      },
+      twPost(screen, params, data) {
+        return new Promise((resolve, reject) => {
+          TribalWars.post(screen, params, data, resolve, reject);
+        });
+      }
+    };
+  }
+
+  // src/services/scheduler.ts
+  function createSchedulerService(storage) {
+    const timers = /* @__PURE__ */ new Map();
+    const nextRunAt = /* @__PURE__ */ new Map();
+    function storageKey(id) {
+      return `scheduler:next:${id}`;
+    }
+    async function schedule(task) {
+      const stored = await storage.get(storageKey(task.id));
+      const now = Date.now();
+      const next = stored ?? now;
+      if (now >= next) {
+        await execute(task);
+      } else {
+        const delay3 = next - now;
+        nextRunAt.set(task.id, next);
+        const timer = setTimeout(() => void execute(task), delay3);
+        timers.set(task.id, timer);
+      }
+    }
+    async function execute(task) {
+      clearTimer(task.id);
+      try {
+        await task.run();
+      } finally {
+        const next = Date.now() + task.interval;
+        nextRunAt.set(task.id, next);
+        await storage.set(storageKey(task.id), next);
+        const timer = setTimeout(() => void execute(task), task.interval);
+        timers.set(task.id, timer);
+      }
+    }
+    function clearTimer(id) {
+      const t = timers.get(id);
+      if (t !== void 0) {
+        clearTimeout(t);
+        timers.delete(id);
+      }
+      nextRunAt.delete(id);
+    }
+    return {
+      register: schedule,
+      async unregister(id) {
+        clearTimer(id);
+        await storage.remove(storageKey(id));
+      },
+      getRemaining(id) {
+        const next = nextRunAt.get(id);
+        if (next === void 0) return 0;
+        return Math.max(0, next - Date.now());
+      }
+    };
+  }
+
+  // src/services/world-config.ts
+  var STORAGE_KEY_PREFIX = "world-config:";
+  var CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+  function parseXml(xml) {
+    const doc = new DOMParser().parseFromString(xml, "text/xml");
+    const get = (tag) => doc.querySelector(tag)?.textContent ?? "0";
+    return {
+      speed: parseFloat(get("speed")) || 1,
+      unit_speed: parseFloat(get("unit_speed")) || 1,
+      moral: parseInt(get("moral"), 10) || 0,
+      scavenging: get("scavenging") === "1"
+    };
+  }
+  function createWorldConfigService(gameData, storage) {
+    let cached = null;
+    return {
+      async get() {
+        if (cached) return cached;
+        const world = gameData.snapshot()?.world;
+        if (!world) throw new Error("WorldConfigService: no game_data.world available");
+        const cacheKey = `${STORAGE_KEY_PREFIX}${world}`;
+        const stored = await storage.get(cacheKey);
+        if (stored && Date.now() < stored.expiresAt) {
+          cached = stored.config;
+          return cached;
+        }
+        const host = window.location.hostname;
+        const url = `https://${host}/interface.php?func=get_config`;
+        const res = await fetch(url, { credentials: "omit" });
+        if (!res.ok) throw new Error(`WorldConfigService: fetch failed (${res.status})`);
+        const xml = await res.text();
+        cached = parseXml(xml);
+        await storage.set(cacheKey, { config: cached, expiresAt: Date.now() + CACHE_TTL_MS });
+        return cached;
       }
     };
   }
@@ -452,30 +556,50 @@
     style.id = THEME_ID;
     style.textContent = `
     :root {
-      --ph-bg:         #1a1410;
-      --ph-bg-light:   #2a1f14;
-      --ph-border:     #5c4a2a;
-      --ph-gold:       #d4aa70;
-      --ph-gold-light: #e8c896;
-      --ph-green:      #5a8c3a;
-      --ph-text:       #c8b89a;
-      --ph-text-dim:   #8a7a6a;
-      --ph-radius:     4px;
-      --ph-panel-bg:   var(--ph-bg);
-      --ph-panel-bg-image: none;
-      --ph-panel-header-bg: var(--ph-bg-light);
-      --ph-panel-border: var(--ph-border);
-      --ph-panel-accent: var(--ph-gold);
-      --ph-panel-top: 72px;
-      --ph-panel-left: 8px;
-      --ph-brand-radius: 3px;
+      /* Parchment palette \u2014 validated in mockups */
+      --ph-bg:          #ece0c0;
+      --ph-sidebar:     #e3d3ac;
+      --ph-surface:     #f5edd6;
+      --ph-surface-alt: #e8dcbb;
+      --ph-header:      #c1a264;
+      --ph-on-header:   #3e2606;
+      --ph-border:      #b9985f;
+      --ph-border-soft: #cdb583;
+      --ph-text:        #4a3617;
+      --ph-text-2:      #7a6038;
+      --ph-text-dim:    #9a855f;
+      --ph-sel-bg:      #c1a264;
+      --ph-sel-text:    #3e2606;
+      --ph-green:       #5a8c3a;
+      --ph-green-text:  #3b6d11;
+      --ph-icon:        #8a5a1e;
+
+      /* Activity monitor status pills */
+      --ph-status-running:    #5a8c3a;
+      --ph-status-waiting:    #c87c1a;
+      --ph-status-scheduled:  #4a72a0;
+
+      /* Backward-compat aliases for module CSS (ph-nm-*, ph-rc-*) */
+      --ph-gold:             #c1a264;
+      --ph-gold-light:       #d4aa70;
+      --ph-bg-light:         #f0e5c8;
+      --ph-panel-bg:         var(--ph-bg);
+      --ph-panel-bg-image:   none;
+      --ph-panel-header-bg:  var(--ph-header);
+      --ph-panel-border:     var(--ph-border);
+      --ph-panel-accent:     var(--ph-header);
+
+      /* Layout */
+      --ph-radius:           4px;
+      --ph-brand-radius:     3px;
       --ph-launcher-mark-size: 25px;
-      --ph-header-mark-size: 26px;
-      --ph-z-dock:     2147482000;
-      --ph-z-launcher: 2147482001;
+      --ph-header-mark-size:   26px;
+      --ph-z-strip:    2147482000;
+      --ph-z-overlay:  2147482500;
       --ph-z-root:     2147483000;
     }
 
+    /* --- Launcher (quest-bar anchor) --- */
     #phantom-launcher {
       display: flex;
       align-items: center;
@@ -486,16 +610,13 @@
       background: var(--ph-bg);
       border: 1px solid var(--ph-border);
       border-radius: var(--ph-radius);
-      color: var(--ph-gold);
-      z-index: var(--ph-z-launcher);
+      color: var(--ph-header);
+      z-index: var(--ph-z-strip);
       user-select: none;
       box-sizing: border-box;
       overflow: hidden;
     }
-    #phantom-launcher:hover {
-      border-color: var(--ph-gold);
-      color: var(--ph-gold-light);
-    }
+    #phantom-launcher:hover { border-color: var(--ph-icon); }
     .ph-launcher-mark {
       width: var(--ph-launcher-mark-size);
       height: var(--ph-launcher-mark-size);
@@ -505,55 +626,58 @@
       pointer-events: none;
     }
 
-    #phantom-dock {
+    /* ===== HUB MODAL ===== */
+
+    #phantom-overlay {
       position: fixed;
-      top: var(--ph-panel-top);
-      left: var(--ph-panel-left);
-      width: min(560px, calc(100vw - 24px));
-      max-height: min(620px, calc(100vh - 96px));
-      background-color: var(--ph-panel-bg);
-      background-image: var(--ph-panel-bg-image);
-      background-size: cover;
-      background-position: center;
-      border: 1px solid var(--ph-panel-border);
-      border-radius: var(--ph-radius);
-      color: var(--ph-text);
-      font-family: Verdana, sans-serif;
-      font-size: 11px;
-      z-index: var(--ph-z-dock);
+      inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: var(--ph-z-overlay);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #phantom-overlay.ph-hidden { display: none; }
+
+    #phantom-hub {
+      width: min(800px, calc(100vw - 32px));
+      height: min(600px, calc(100vh - 64px));
+      background: var(--ph-bg);
+      border: 2px solid var(--ph-border);
+      border-radius: 6px;
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      pointer-events: auto;
-      box-shadow: 0 4px 22px rgba(0,0,0,0.65);
+      box-shadow: 0 8px 40px rgba(0,0,0,0.45);
+      font-family: Verdana, sans-serif;
+      font-size: 11px;
+      color: var(--ph-text);
     }
-    #phantom-dock.ph-hidden { display: none; }
 
-    .ph-dock-header {
-      min-height: 42px;
-      padding: 7px 9px;
-      border-bottom: 1px solid var(--ph-panel-border);
-      background: var(--ph-panel-header-bg);
-      user-select: none;
+    .ph-hub-header {
+      background: var(--ph-header);
+      color: var(--ph-on-header);
+      min-height: 44px;
+      padding: 7px 10px;
       display: flex;
       align-items: center;
       gap: 8px;
       flex-shrink: 0;
+      border-bottom: 2px solid var(--ph-border);
+      user-select: none;
     }
 
-    .ph-dock-brand {
+    .ph-hub-brand {
       width: 28px;
       height: 28px;
-      border: 1px solid var(--ph-panel-border);
       border-radius: var(--ph-brand-radius);
       display: flex;
       align-items: center;
       justify-content: center;
-      background: var(--ph-bg);
+      background: rgba(0,0,0,0.12);
       overflow: hidden;
       flex-shrink: 0;
     }
-
     .ph-brand-mark {
       width: var(--ph-header-mark-size);
       height: var(--ph-header-mark-size);
@@ -563,185 +687,236 @@
       pointer-events: none;
     }
 
-    .ph-dock-titleblock {
-      min-width: 0;
-      flex: 1;
-    }
-
-    .ph-dock-title {
-      color: var(--ph-panel-accent);
+    .ph-hub-titleblock { min-width: 0; flex: 1; }
+    .ph-hub-title {
       font-weight: bold;
       font-size: 13px;
+      color: var(--ph-on-header);
       line-height: 15px;
     }
-
-    .ph-dock-version {
-      color: var(--ph-text-dim);
+    .ph-hub-version {
       font-size: 9px;
+      color: rgba(62,38,6,0.7);
       line-height: 12px;
     }
 
-    .ph-dock-close {
-      width: 22px;
-      height: 22px;
-      border: 1px solid var(--ph-panel-border);
+    .ph-hub-close {
+      width: 24px;
+      height: 24px;
+      border: 1px solid rgba(62,38,6,0.3);
       border-radius: var(--ph-radius);
-      background: var(--ph-bg);
-      color: var(--ph-text-dim);
+      background: rgba(0,0,0,0.1);
+      color: var(--ph-on-header);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 0;
+      font-size: 14px;
       line-height: 1;
       flex-shrink: 0;
     }
-    .ph-dock-close:hover {
-      color: var(--ph-gold-light);
-      border-color: var(--ph-panel-accent);
-    }
+    .ph-hub-close:hover { background: rgba(0,0,0,0.25); }
 
-    .ph-dock-body {
+    .ph-hub-body {
       display: grid;
-      grid-template-columns: 155px minmax(0, 1fr);
+      grid-template-columns: 160px minmax(0, 1fr);
       min-height: 0;
+      flex: 1;
       overflow: hidden;
     }
 
-    .ph-dock-sidebar {
-      border-right: 1px solid var(--ph-panel-border);
-      background: rgba(42,31,20,0.72);
-      padding: 6px;
+    /* --- Sidebar --- */
+    .ph-hub-sidebar {
+      background: var(--ph-sidebar);
+      border-right: 1px solid var(--ph-border);
+      padding: 6px 0;
       overflow-y: auto;
-      max-height: calc(min(620px, calc(100vh - 96px)) - 43px);
-    }
-
-    .ph-category-tab {
-      width: 100%;
-      min-height: 30px;
-      border: 1px solid transparent;
-      border-radius: var(--ph-radius);
-      background: transparent;
-      color: var(--ph-text);
-      cursor: pointer;
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-      padding: 5px 6px;
-      margin-bottom: 4px;
-      font-size: 10px;
-      text-align: left;
+      flex-direction: column;
     }
-    .ph-category-tab:hover,
-    .ph-category-tab.ph-selected {
-      background: var(--ph-bg-light);
-      border-color: var(--ph-panel-border);
-      color: var(--ph-gold-light);
-    }
+    .ph-hub-sidebar::-webkit-scrollbar { width: 3px; }
+    .ph-hub-sidebar::-webkit-scrollbar-track { background: var(--ph-sidebar); }
+    .ph-hub-sidebar::-webkit-scrollbar-thumb { background: var(--ph-border-soft); border-radius: 2px; }
 
-    .ph-category-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .ph-category-badge {
-      min-width: 16px;
-      height: 16px;
-      border-radius: 8px;
-      background: var(--ph-bg);
-      border: 1px solid var(--ph-panel-border);
-      color: var(--ph-panel-accent);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 9px;
-      flex-shrink: 0;
-    }
-
-    .ph-dock-content {
-      min-width: 0;
-      overflow-y: auto;
-      max-height: calc(min(620px, calc(100vh - 96px)) - 43px);
-      padding: 8px;
-    }
-    .ph-dock-sidebar::-webkit-scrollbar,
-    .ph-dock-content::-webkit-scrollbar { width: 4px; }
-    .ph-dock-sidebar::-webkit-scrollbar-track,
-    .ph-dock-content::-webkit-scrollbar-track { background: var(--ph-bg); }
-    .ph-dock-sidebar::-webkit-scrollbar-thumb,
-    .ph-dock-content::-webkit-scrollbar-thumb { background: var(--ph-border); border-radius: 2px; }
-
-    .ph-content-heading {
-      color: var(--ph-panel-accent);
-      font-size: 11px;
-      font-weight: bold;
-      text-transform: uppercase;
-      margin-bottom: 7px;
-    }
-
-    .ph-module-card {
-      border: 1px solid var(--ph-panel-border);
-      border-radius: var(--ph-radius);
-      background: rgba(26,20,16,0.88);
-      padding: 7px;
-      margin-bottom: 7px;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .ph-module-card-main {
-      min-width: 0;
+    .ph-nav-item {
       display: flex;
       align-items: center;
       gap: 7px;
-    }
-
-    .ph-module-text {
-      min-width: 0;
-      flex: 1;
-    }
-
-    .ph-mod-icon {
-      font-size: 14px;
-      width: 18px;
-      text-align: center;
-      flex-shrink: 0;
-    }
-
-    .ph-mod-name {
-      color: var(--ph-text);
+      padding: 7px 10px;
+      cursor: pointer;
+      color: var(--ph-text-2);
+      border-left: 3px solid transparent;
+      font-size: 11px;
+      user-select: none;
+      transition: background 0.1s;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .ph-nav-item:hover {
+      background: rgba(193,162,100,0.18);
+      color: var(--ph-text);
+    }
+    .ph-nav-item.ph-sel {
+      background: rgba(193,162,100,0.28);
+      border-left-color: var(--ph-header);
+      color: var(--ph-text);
       font-weight: bold;
     }
-
-    .ph-mod-meta {
-      margin-top: 2px;
-      color: var(--ph-text-dim);
+    .ph-nav-icon { font-size: 13px; width: 16px; text-align: center; flex-shrink: 0; }
+    .ph-nav-badge {
+      margin-left: auto;
+      min-width: 16px;
+      height: 16px;
+      border-radius: 8px;
+      background: var(--ph-border-soft);
+      color: var(--ph-text);
       font-size: 9px;
-    }
-
-    .ph-module-controls {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
-      gap: 6px;
+      justify-content: center;
       flex-shrink: 0;
+    }
+    .ph-nav-badge.ph-has-active {
+      background: var(--ph-green);
+      color: #fff;
+    }
+    .ph-nav-sep {
+      height: 1px;
+      background: var(--ph-border-soft);
+      margin: 4px 8px;
     }
 
-    .ph-indicator {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--ph-text-dim);
+    /* --- Hub content area --- */
+    .ph-hub-content {
+      overflow-y: auto;
+      padding: 12px;
+      background: var(--ph-bg);
+    }
+    .ph-hub-content::-webkit-scrollbar { width: 4px; }
+    .ph-hub-content::-webkit-scrollbar-track { background: var(--ph-bg); }
+    .ph-hub-content::-webkit-scrollbar-thumb { background: var(--ph-border-soft); border-radius: 2px; }
+
+    /* --- Home view --- */
+    .ph-view-home { display: flex; flex-direction: column; gap: 12px; }
+
+    .ph-profile-card {
+      background: var(--ph-surface);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--ph-radius);
+      padding: 10px 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .ph-profile-avatar {
+      font-size: 28px;
+      line-height: 1;
       flex-shrink: 0;
     }
-    .ph-indicator.ph-active { background: var(--ph-green); }
+    .ph-profile-info { min-width: 0; flex: 1; }
+    .ph-profile-name {
+      font-weight: bold;
+      font-size: 13px;
+      color: var(--ph-text);
+      margin-bottom: 2px;
+    }
+    .ph-profile-meta {
+      font-size: 10px;
+      color: var(--ph-text-2);
+      line-height: 1.6;
+    }
+    .ph-profile-pill {
+      display: inline-block;
+      background: var(--ph-green);
+      color: #fff;
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      margin-top: 4px;
+    }
+
+    .ph-section-heading {
+      font-weight: bold;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--ph-text-dim);
+      margin-bottom: 6px;
+    }
+
+    .ph-monitor {
+      background: var(--ph-surface);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--ph-radius);
+      overflow: hidden;
+    }
+    .ph-monitor-group-label {
+      background: var(--ph-surface-alt);
+      border-bottom: 1px solid var(--ph-border-soft);
+      padding: 4px 10px;
+      font-size: 10px;
+      font-weight: bold;
+      color: var(--ph-text-2);
+    }
+    .ph-monitor-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+    .ph-monitor-row:last-child { border-bottom: none; }
+    .ph-mon-icon { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+    .ph-mon-name { flex: 1; font-weight: bold; color: var(--ph-text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ph-mon-timer { font-size: 10px; color: var(--ph-text-dim); min-width: 54px; text-align: right; }
+
+    .ph-status-pill {
+      font-size: 9px;
+      padding: 2px 7px;
+      border-radius: 8px;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .ph-status-pill.running   { background: var(--ph-status-running); }
+    .ph-status-pill.waiting   { background: var(--ph-status-waiting); }
+    .ph-status-pill.scheduled { background: var(--ph-status-scheduled); }
+    .ph-status-pill.idle      { background: var(--ph-text-dim); }
+
+    .ph-monitor-empty {
+      padding: 12px 10px;
+      color: var(--ph-text-dim);
+      font-size: 11px;
+      text-align: center;
+    }
+
+    /* --- Category view --- */
+    .ph-view-cat { display: flex; flex-direction: column; gap: 6px; }
+
+    .ph-cat-heading {
+      font-weight: bold;
+      font-size: 13px;
+      color: var(--ph-text);
+      margin-bottom: 4px;
+      border-bottom: 1px solid var(--ph-border-soft);
+      padding-bottom: 6px;
+    }
+
+    .ph-mod-row {
+      background: var(--ph-surface);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--ph-radius);
+      padding: 8px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ph-mod-row-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+    .ph-mod-row-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+    .ph-mod-row-text { min-width: 0; flex: 1; }
+    .ph-mod-row-name { font-weight: bold; color: var(--ph-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ph-mod-row-meta { font-size: 9px; color: var(--ph-text-dim); margin-top: 1px; }
+    .ph-mod-row-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
     .ph-toggle {
       appearance: none;
@@ -749,11 +924,12 @@
       width: 28px;
       height: 15px;
       border-radius: 8px;
-      background: var(--ph-text-dim);
+      background: var(--ph-border-soft);
       position: relative;
       cursor: pointer;
       flex-shrink: 0;
       transition: background 0.15s;
+      border: none;
     }
     .ph-toggle:checked { background: var(--ph-green); }
     .ph-toggle::after {
@@ -769,58 +945,116 @@
     }
     .ph-toggle:checked::after { left: 15px; }
 
-    .ph-btn-run {
-      min-width: 42px;
+    .ph-btn-open, .ph-btn-config {
       height: 22px;
-      padding: 2px 7px;
-      background: var(--ph-bg-light);
-      border: 1px solid var(--ph-border);
+      padding: 0 9px;
       border-radius: var(--ph-radius);
-      color: var(--ph-gold);
       cursor: pointer;
       font-size: 9px;
+      font-family: Verdana, sans-serif;
       flex-shrink: 0;
-    }
-    .ph-btn-run:hover { border-color: var(--ph-gold); color: var(--ph-gold-light); }
-
-    /* --- Toggle open/close button (Phase 2) --- */
-    .ph-btn-toggle {
-      min-width: 48px;
-      height: 22px;
-      padding: 2px 7px;
-      background: var(--ph-bg-light);
       border: 1px solid var(--ph-border);
-      border-radius: var(--ph-radius);
-      color: var(--ph-gold);
-      cursor: pointer;
-      font-size: 9px;
-      flex-shrink: 0;
+      background: var(--ph-surface-alt);
+      color: var(--ph-text);
     }
-    .ph-btn-toggle:hover:not(:disabled) { border-color: var(--ph-gold); color: var(--ph-gold-light); }
-    .ph-btn-toggle:disabled { color: var(--ph-text-dim); cursor: default; }
+    .ph-btn-open:hover:not(:disabled) { border-color: var(--ph-icon); color: var(--ph-icon); }
+    .ph-btn-config:hover:not(:disabled) { border-color: var(--ph-icon); color: var(--ph-icon); }
+    .ph-btn-open:disabled, .ph-btn-config:disabled { color: var(--ph-text-dim); cursor: default; }
 
-    .ph-dock-empty {
-      color: var(--ph-text-dim);
-      padding: 12px;
+    .ph-empty-state {
+      padding: 20px;
       text-align: center;
+      color: var(--ph-text-dim);
     }
 
-    @media (max-width: 560px) {
-      #phantom-dock {
-        width: calc(100vw - 16px);
-      }
-      .ph-dock-body {
-        grid-template-columns: 120px minmax(0, 1fr);
-      }
-      .ph-module-card {
-        grid-template-columns: minmax(0, 1fr);
-      }
-      .ph-module-controls {
-        justify-content: flex-start;
-      }
+    /* --- Sub-page view --- */
+    .ph-view-sub { display: flex; flex-direction: column; height: 100%; }
+
+    .ph-sub-topbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--ph-border-soft);
+      flex-shrink: 0;
+    }
+    .ph-sub-back {
+      height: 22px;
+      padding: 0 8px;
+      background: var(--ph-surface-alt);
+      border: 1px solid var(--ph-border);
+      border-radius: var(--ph-radius);
+      color: var(--ph-text-2);
+      cursor: pointer;
+      font-size: 10px;
+      font-family: Verdana, sans-serif;
+    }
+    .ph-sub-back:hover { border-color: var(--ph-icon); color: var(--ph-icon); }
+    .ph-sub-title { font-weight: bold; font-size: 12px; color: var(--ph-text); }
+
+    .ph-sub-content { flex: 1; min-height: 0; overflow-y: auto; }
+    .ph-sub-content::-webkit-scrollbar { width: 4px; }
+    .ph-sub-content::-webkit-scrollbar-track { background: var(--ph-bg); }
+    .ph-sub-content::-webkit-scrollbar-thumb { background: var(--ph-border-soft); border-radius: 2px; }
+
+    /* ===== RIGHT-SIDE ICON STRIP ===== */
+    #phantom-strip {
+      position: fixed;
+      right: 4px;
+      top: 110px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      z-index: var(--ph-z-strip);
+      pointer-events: auto;
     }
 
-    /* --- Window Manager root (Phase 2) --- */
+    .ph-strip-item {
+      width: 30px;
+      height: 30px;
+      background: var(--ph-bg);
+      border: 1px solid var(--ph-border);
+      border-radius: var(--ph-radius);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      user-select: none;
+      position: relative;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+    }
+    .ph-strip-item:hover { border-color: var(--ph-icon); background: var(--ph-surface); }
+    .ph-strip-item.ph-strip-launcher {
+      font-size: 13px;
+      overflow: hidden;
+      padding: 0;
+    }
+    .ph-strip-item.ph-strip-launcher img {
+      width: 26px;
+      height: 26px;
+      object-fit: cover;
+      border-radius: var(--ph-brand-radius);
+      display: block;
+    }
+    .ph-strip-badge {
+      position: absolute;
+      top: -3px;
+      right: -3px;
+      min-width: 12px;
+      height: 12px;
+      border-radius: 6px;
+      background: var(--ph-green);
+      color: #fff;
+      font-size: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    /* ===== WINDOW MANAGER (reserved for floating overlays) ===== */
     #phantom-root {
       position: fixed;
       top: 0;
@@ -842,7 +1076,7 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.65);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.35);
     }
 
     .ph-win-titlebar {
@@ -850,7 +1084,7 @@
       align-items: center;
       gap: 4px;
       padding: 5px 8px;
-      background: var(--ph-bg-light);
+      background: var(--ph-header);
       border-bottom: 1px solid var(--ph-border);
       cursor: move;
       user-select: none;
@@ -859,7 +1093,7 @@
 
     .ph-win-title {
       flex: 1;
-      color: var(--ph-gold);
+      color: var(--ph-on-header);
       font-weight: bold;
       font-size: 11px;
       white-space: nowrap;
@@ -870,10 +1104,10 @@
     .ph-win-btn {
       width: 18px;
       height: 18px;
-      border: 1px solid var(--ph-border);
+      border: 1px solid rgba(62,38,6,0.3);
       border-radius: 3px;
-      background: var(--ph-bg);
-      color: var(--ph-text-dim);
+      background: rgba(0,0,0,0.1);
+      color: var(--ph-on-header);
       cursor: pointer;
       font-size: 10px;
       line-height: 1;
@@ -883,8 +1117,8 @@
       align-items: center;
       justify-content: center;
     }
-    .ph-win-btn:hover { color: var(--ph-text); border-color: var(--ph-gold); }
-    .ph-win-btn-close:hover { color: #e44; border-color: #e44; }
+    .ph-win-btn:hover { background: rgba(0,0,0,0.25); }
+    .ph-win-btn-close:hover { background: rgba(200,50,50,0.6); }
 
     .ph-window.ph-minimized { height: auto !important; min-height: 0 !important; }
     .ph-window.ph-minimized .ph-win-content { display: none; }
@@ -900,7 +1134,7 @@
     .ph-win-content::-webkit-scrollbar-track { background: var(--ph-bg); }
     .ph-win-content::-webkit-scrollbar-thumb { background: var(--ph-border); border-radius: 2px; }
 
-    /* --- Notas Manuais module (Phase 3) --- */
+    /* ===== Notas Manuais module ===== */
     .ph-nm-section { margin-bottom: 8px; }
     .ph-nm-label {
       display: block;
@@ -933,7 +1167,7 @@
       color: var(--ph-text);
       cursor: pointer;
     }
-    .ph-nm-preset:hover { border-color: var(--ph-gold); color: var(--ph-gold); }
+    .ph-nm-preset:hover { border-color: var(--ph-gold); color: var(--ph-icon); }
     .ph-nm-actions { display: flex; gap: 6px; margin-bottom: 8px; }
     .ph-nm-btn {
       flex: 1;
@@ -945,10 +1179,10 @@
       cursor: pointer;
       font-size: 10px;
     }
-    .ph-nm-btn:hover:not(:disabled) { border-color: var(--ph-gold-light); color: var(--ph-gold-light); }
+    .ph-nm-btn:hover:not(:disabled) { border-color: var(--ph-icon); color: var(--ph-icon); }
     .ph-nm-btn:disabled { color: var(--ph-text-dim); cursor: default; }
-    .ph-nm-btn-stop { color: #c84; border-color: #a63; }
-    .ph-nm-btn-stop:hover:not(:disabled) { color: #f96; border-color: #f96; }
+    .ph-nm-btn-stop { color: #a05820; border-color: #8c4a1a; }
+    .ph-nm-btn-stop:hover:not(:disabled) { color: #c06828; border-color: #c06828; }
     .ph-nm-progress-track {
       width: 100%;
       height: 6px;
@@ -977,11 +1211,11 @@
       overflow-y: auto;
     }
     .ph-nm-log-line { margin: 0; padding: 1px 0; }
-    .ph-nm-log-line.ok   { color: var(--ph-green); }
-    .ph-nm-log-line.err  { color: #e55; }
+    .ph-nm-log-line.ok   { color: var(--ph-green-text); }
+    .ph-nm-log-line.err  { color: #a03020; }
     .ph-nm-log-line.info { color: var(--ph-text-dim); }
 
-    /* --- Renomear a Cores module (Phase 4) --- */
+    /* ===== Renomear a Cores module ===== */
     .ph-rc-group {
       display: inline-flex;
       gap: 2px;
@@ -993,7 +1227,7 @@
       border: 1px solid var(--ph-rc-color, #888);
       border-radius: 2px;
       background: transparent;
-      color: var(--ph-rc-color, #ccc);
+      color: var(--ph-rc-color, var(--ph-text-2));
       cursor: pointer;
       font-size: 9px;
       font-family: Verdana, sans-serif;
@@ -1035,13 +1269,23 @@
   // src/ui/shell/index.ts
   var CATEGORY_LABELS = {
     "overview": "Overview",
-    "farm-economy": "Farm & Economy",
-    "attack-defense": "Attack & Defense",
-    "planning": "Planning",
-    "map": "Map",
-    "utilities": "Utilities",
-    "automation": "Automation",
-    "tribe": "Tribe"
+    "farm-economy": "Farm & Eco.",
+    "attack-defense": "Ataque & Def.",
+    "planning": "Planeamento",
+    "map": "Mapa",
+    "utilities": "Utilidades",
+    "automation": "Automa\xE7\xE3o",
+    "tribe": "Tribo"
+  };
+  var CATEGORY_ICONS = {
+    "overview": "\u{1F3E0}",
+    "farm-economy": "\u{1F33E}",
+    "attack-defense": "\u2694\uFE0F",
+    "planning": "\u{1F4CB}",
+    "map": "\u{1F5FA}\uFE0F",
+    "utilities": "\u{1F527}",
+    "automation": "\u2699\uFE0F",
+    "tribe": "\u{1F6E1}\uFE0F"
   };
   var CATEGORY_ORDER = [
     "overview",
@@ -1053,306 +1297,450 @@
     "automation",
     "tribe"
   ];
-  var AUTO_KINDS = ["auto", "page", "background"];
-  function createDock(modules, enabledState, callbacks) {
-    const dock = document.createElement("div");
-    dock.id = "phantom-dock";
-    dock.classList.add("ph-hidden");
+  var AUTO_KINDS = /* @__PURE__ */ new Set(["auto", "page", "background"]);
+  function createHub(modules, enabledState, gameData, scheduler, callbacks) {
+    let destroyed = false;
+    let router = { view: "home" };
+    const activeState = /* @__PURE__ */ new Map();
+    const localEnabled = /* @__PURE__ */ new Map();
+    for (const m of modules) localEnabled.set(m.id, enabledState[m.id] ?? true);
+    const byCategory = /* @__PURE__ */ new Map();
+    for (const cat of CATEGORY_ORDER) byCategory.set(cat, []);
+    for (const m of modules) {
+      const list = byCategory.get(m.category);
+      if (list) list.push(m);
+    }
+    const activeCountForCat = (cat) => (byCategory.get(cat) ?? []).filter((m) => activeState.get(m.id)).length;
+    const overlay = document.createElement("div");
+    overlay.id = "phantom-overlay";
+    overlay.classList.add("ph-hidden");
+    const hub = document.createElement("div");
+    hub.id = "phantom-hub";
+    overlay.appendChild(hub);
     const header = document.createElement("div");
-    header.className = "ph-dock-header";
+    header.className = "ph-hub-header";
     const brand = document.createElement("div");
-    brand.className = "ph-dock-brand";
-    const brandMark = document.createElement("img");
-    brandMark.className = "ph-brand-mark";
-    brandMark.src = PHANTOM_MARK_DATA_URI;
-    brandMark.alt = "";
-    brandMark.setAttribute("aria-hidden", "true");
-    brand.appendChild(brandMark);
+    brand.className = "ph-hub-brand";
+    const brandImg = document.createElement("img");
+    brandImg.className = "ph-brand-mark";
+    brandImg.src = PHANTOM_MARK_DATA_URI;
+    brandImg.alt = "";
+    brandImg.setAttribute("aria-hidden", "true");
+    brand.appendChild(brandImg);
     const titleBlock = document.createElement("div");
-    titleBlock.className = "ph-dock-titleblock";
-    const title = document.createElement("div");
-    title.className = "ph-dock-title";
-    title.textContent = "Phantom";
-    const version = document.createElement("div");
-    version.className = "ph-dock-version";
-    version.textContent = "v0.1";
-    titleBlock.append(title, version);
+    titleBlock.className = "ph-hub-titleblock";
+    const titleEl = document.createElement("div");
+    titleEl.className = "ph-hub-title";
+    titleEl.textContent = "Phantom";
+    const versionEl = document.createElement("div");
+    versionEl.className = "ph-hub-version";
+    versionEl.textContent = "v0.1";
+    titleBlock.append(titleEl, versionEl);
     const closeBtn = document.createElement("button");
-    closeBtn.className = "ph-dock-close";
+    closeBtn.className = "ph-hub-close";
     closeBtn.type = "button";
     closeBtn.title = "Fechar";
     closeBtn.textContent = "\xD7";
-    closeBtn.addEventListener("click", () => dock.classList.add("ph-hidden"));
+    closeBtn.addEventListener("click", () => overlay.classList.add("ph-hidden"));
     header.append(brand, titleBlock, closeBtn);
-    dock.appendChild(header);
+    hub.appendChild(header);
     const body = document.createElement("div");
-    body.className = "ph-dock-body";
-    dock.appendChild(body);
-    const sidebar = document.createElement("div");
-    sidebar.className = "ph-dock-sidebar";
-    const content = document.createElement("div");
-    content.className = "ph-dock-content";
-    body.append(sidebar, content);
-    const groups = /* @__PURE__ */ new Map();
-    for (const mod of modules) {
-      const list = groups.get(mod.category) ?? [];
-      list.push(mod);
-      groups.set(mod.category, list);
+    body.className = "ph-hub-body";
+    hub.appendChild(body);
+    const sidebar = document.createElement("nav");
+    sidebar.className = "ph-hub-sidebar";
+    const contentArea = document.createElement("div");
+    contentArea.className = "ph-hub-content";
+    body.append(sidebar, contentArea);
+    const navItems = /* @__PURE__ */ new Map();
+    const navBadges = /* @__PURE__ */ new Map();
+    const makeNavItem = (icon, label, key, onClick) => {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "ph-nav-item";
+      el.dataset.key = key;
+      const iconEl = document.createElement("span");
+      iconEl.className = "ph-nav-icon";
+      iconEl.textContent = icon;
+      const labelEl = document.createElement("span");
+      labelEl.textContent = label;
+      el.append(iconEl, labelEl);
+      el.addEventListener("click", onClick);
+      navItems.set(key, el);
+      return el;
+    };
+    sidebar.appendChild(makeNavItem("\u{1F47B}", "In\xEDcio", "home", () => navigate({ view: "home" })));
+    const sep = document.createElement("div");
+    sep.className = "ph-nav-sep";
+    sidebar.appendChild(sep);
+    for (const cat of CATEGORY_ORDER) {
+      const el = makeNavItem(CATEGORY_ICONS[cat], CATEGORY_LABELS[cat], cat, () => navigate({ view: "category", cat }));
+      const badge = document.createElement("span");
+      badge.className = "ph-nav-badge";
+      badge.textContent = "0";
+      navBadges.set(cat, badge);
+      el.appendChild(badge);
+      sidebar.appendChild(el);
     }
-    const visibleCategories = CATEGORY_ORDER;
-    let selectedCategory = CATEGORY_ORDER.find((cat) => (groups.get(cat) ?? []).length > 0) ?? null;
-    const activeState = /* @__PURE__ */ new Map();
-    const indicators = /* @__PURE__ */ new Map();
-    const toggleBtns = /* @__PURE__ */ new Map();
-    const enableToggles = /* @__PURE__ */ new Map();
-    const categoryBtns = /* @__PURE__ */ new Map();
-    const categoryBadges = /* @__PURE__ */ new Map();
-    let renderedModuleIds = [];
-    let destroyed = false;
-    const activeCount = (cat) => {
-      const mods = groups.get(cat) ?? [];
-      return mods.filter((mod) => activeState.get(mod.id)).length;
-    };
-    const updateCategoryChrome = () => {
-      for (const cat of visibleCategories) {
-        const btn = categoryBtns.get(cat);
-        const badge = categoryBadges.get(cat);
-        btn?.classList.toggle("ph-selected", cat === selectedCategory);
-        if (badge) badge.textContent = String(activeCount(cat));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) overlay.classList.add("ph-hidden");
+    });
+    document.body.appendChild(overlay);
+    const strip = document.createElement("div");
+    strip.id = "phantom-strip";
+    const stripLauncher = document.createElement("button");
+    stripLauncher.type = "button";
+    stripLauncher.className = "ph-strip-item ph-strip-launcher";
+    stripLauncher.title = "Phantom";
+    const launcherImg = document.createElement("img");
+    launcherImg.src = PHANTOM_MARK_DATA_URI;
+    launcherImg.alt = "Phantom";
+    stripLauncher.appendChild(launcherImg);
+    stripLauncher.addEventListener("click", () => overlay.classList.toggle("ph-hidden"));
+    strip.appendChild(stripLauncher);
+    const stripCatIcons = /* @__PURE__ */ new Map();
+    document.body.appendChild(strip);
+    function navigate(next) {
+      if (router.view === "module" && next.view !== "module") {
+        callbacks.onCloseModule(router.moduleId);
       }
-    };
-    const renderContent = () => {
-      for (const id of renderedModuleIds) {
-        indicators.delete(id);
-        toggleBtns.delete(id);
-        enableToggles.delete(id);
+      router = next;
+      renderNav();
+      renderContent();
+    }
+    function renderNav() {
+      for (const [key, el] of navItems) {
+        const sel = key === "home" && router.view === "home" || router.view === "category" && router.cat === key || router.view === "module" && router.cat === key;
+        el.classList.toggle("ph-sel", sel);
       }
-      renderedModuleIds = [];
-      content.replaceChildren();
-      if (!selectedCategory) {
-        const empty = document.createElement("div");
-        empty.className = "ph-dock-empty";
-        empty.textContent = "Nenhum m\xF3dulo dispon\xEDvel neste ecr\xE3";
-        content.appendChild(empty);
-        return;
+      for (const [cat, badge] of navBadges) {
+        const count = activeCountForCat(cat);
+        badge.textContent = String(count);
+        badge.classList.toggle("ph-has-active", count > 0);
       }
+    }
+    function renderContent() {
+      contentArea.replaceChildren();
+      if (router.view === "home") {
+        renderHome();
+      } else if (router.view === "category") {
+        renderCategory(router.cat);
+      } else if (router.view === "module") {
+        renderModulePage(router.moduleId, router.cat, router.contentEl);
+      }
+    }
+    function renderHome() {
+      const view = document.createElement("div");
+      view.className = "ph-view-home";
+      const card = document.createElement("div");
+      card.className = "ph-profile-card";
+      const avatar = document.createElement("div");
+      avatar.className = "ph-profile-avatar";
+      avatar.textContent = "\u{1F464}";
+      const info = document.createElement("div");
+      info.className = "ph-profile-info";
+      const nameEl = document.createElement("div");
+      nameEl.className = "ph-profile-name";
+      nameEl.textContent = gameData?.player.name ?? "\u2014";
+      const meta = document.createElement("div");
+      meta.className = "ph-profile-meta";
+      const tribe = gameData?.player.ally_tag ? `[${gameData.player.ally_tag}]` : "Sem tribo";
+      meta.innerHTML = `Mundo: <b>${gameData?.world ?? "\u2014"}</b> &nbsp;\xB7&nbsp; Tribo: <b>${tribe}</b>`;
+      const pill = document.createElement("div");
+      pill.className = "ph-profile-pill";
+      pill.textContent = "Ativo";
+      info.append(nameEl, meta, pill);
+      card.append(avatar, info);
+      view.appendChild(card);
       const heading = document.createElement("div");
-      heading.className = "ph-content-heading";
-      heading.textContent = CATEGORY_LABELS[selectedCategory];
-      content.appendChild(heading);
-      const mods = groups.get(selectedCategory) ?? [];
+      heading.className = "ph-section-heading";
+      heading.textContent = "Monitor de Atividades";
+      view.appendChild(heading);
+      const monitor = document.createElement("div");
+      monitor.className = "ph-monitor";
+      const autoMods = modules.filter((m) => AUTO_KINDS.has(m.activation));
+      const bgMods = autoMods.filter((m) => m.activation === "background");
+      const pageMods = autoMods.filter((m) => m.activation !== "background");
+      if (autoMods.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "ph-monitor-empty";
+        empty.textContent = "Nenhum m\xF3dulo autom\xE1tico ativo neste ecr\xE3.";
+        monitor.appendChild(empty);
+      } else {
+        if (bgMods.length > 0) {
+          const grpLabel = document.createElement("div");
+          grpLabel.className = "ph-monitor-group-label";
+          grpLabel.textContent = "Scripts de background";
+          monitor.appendChild(grpLabel);
+          for (const m of bgMods) monitor.appendChild(makeMonitorRow(m));
+        }
+        if (pageMods.length > 0) {
+          const grpLabel = document.createElement("div");
+          grpLabel.className = "ph-monitor-group-label";
+          grpLabel.textContent = "Scripts de p\xE1gina";
+          monitor.appendChild(grpLabel);
+          for (const m of pageMods) monitor.appendChild(makeMonitorRow(m));
+        }
+      }
+      view.appendChild(monitor);
+      contentArea.appendChild(view);
+    }
+    function makeMonitorRow(m) {
+      const row = document.createElement("div");
+      row.className = "ph-monitor-row";
+      const icon = document.createElement("span");
+      icon.className = "ph-mon-icon";
+      icon.textContent = m.icon;
+      const name = document.createElement("span");
+      name.className = "ph-mon-name";
+      name.textContent = m.name;
+      const isActive = activeState.get(m.id) ?? false;
+      const pill = document.createElement("span");
+      pill.className = "ph-status-pill";
+      if (!localEnabled.get(m.id)) {
+        pill.classList.add("idle");
+        pill.textContent = "Desativado";
+      } else if (isActive) {
+        pill.classList.add("running");
+        pill.textContent = "Ativo";
+      } else {
+        pill.classList.add("idle");
+        pill.textContent = "Inativo";
+      }
+      const timerEl = document.createElement("span");
+      timerEl.className = "ph-mon-timer";
+      if (m.activation === "background" && scheduler && isActive) {
+        const remaining = scheduler.getRemaining(m.id);
+        timerEl.textContent = remaining > 0 ? formatDuration(remaining) : "\u2014";
+      }
+      row.append(icon, name, pill, timerEl);
+      return row;
+    }
+    function renderCategory(cat) {
+      const view = document.createElement("div");
+      view.className = "ph-view-cat";
+      const heading = document.createElement("div");
+      heading.className = "ph-cat-heading";
+      heading.textContent = CATEGORY_LABELS[cat];
+      view.appendChild(heading);
+      const mods = byCategory.get(cat) ?? [];
       if (mods.length === 0) {
         const empty = document.createElement("div");
-        empty.className = "ph-dock-empty";
-        empty.textContent = "Nenhum m\xF3dulo dispon\xEDvel neste ecr\xE3";
-        content.appendChild(empty);
-        return;
+        empty.className = "ph-empty-state";
+        empty.textContent = "Nenhum m\xF3dulo dispon\xEDvel nesta categoria neste ecr\xE3.";
+        view.appendChild(empty);
+      } else {
+        for (const m of mods) {
+          view.appendChild(makeModRow(m, cat));
+        }
       }
-      for (const mod of mods) {
-        renderedModuleIds.push(mod.id);
-        const card = document.createElement("div");
-        card.className = "ph-module-card";
-        const cardMain = document.createElement("div");
-        cardMain.className = "ph-module-card-main";
-        const iconEl = document.createElement("span");
-        iconEl.className = "ph-mod-icon";
-        iconEl.textContent = mod.icon;
-        const textBlock = document.createElement("div");
-        textBlock.className = "ph-module-text";
-        const nameEl = document.createElement("div");
-        nameEl.className = "ph-mod-name";
-        nameEl.textContent = mod.name;
-        if (mod.description) nameEl.title = mod.description;
-        const metaEl = document.createElement("div");
-        metaEl.className = "ph-mod-meta";
-        metaEl.textContent = mod.activation;
-        textBlock.append(nameEl, metaEl);
-        cardMain.append(iconEl, textBlock);
-        const controls = document.createElement("div");
-        controls.className = "ph-module-controls";
-        if (AUTO_KINDS.includes(mod.activation)) {
-          const indicator = document.createElement("span");
-          indicator.className = "ph-indicator";
-          indicator.classList.toggle("ph-active", activeState.get(mod.id) ?? false);
-          indicators.set(mod.id, indicator);
-          controls.appendChild(indicator);
-        }
-        if (mod.activation === "command") {
-          const btn = document.createElement("button");
-          btn.className = "ph-btn-run";
-          btn.type = "button";
-          btn.textContent = "Run";
-          btn.addEventListener("click", () => callbacks.onRun(mod.id));
-          controls.appendChild(btn);
-        }
-        if (mod.activation === "toggle") {
-          const btn = document.createElement("button");
-          btn.className = "ph-btn-toggle";
-          btn.type = "button";
-          btn.textContent = activeState.get(mod.id) ? "Close" : "Open";
-          btn.disabled = !(enabledState[mod.id] ?? true);
-          btn.addEventListener("click", () => callbacks.onToggleOpen(mod.id));
-          toggleBtns.set(mod.id, btn);
-          controls.appendChild(btn);
-        }
-        const toggle = document.createElement("input");
-        toggle.type = "checkbox";
-        toggle.className = "ph-toggle";
-        toggle.title = "Enable module";
-        toggle.checked = enabledState[mod.id] ?? true;
-        toggle.addEventListener("change", () => {
-          const enabled = toggle.checked;
-          callbacks.onToggleEnable(mod.id, enabled);
-          const openBtn = toggleBtns.get(mod.id);
-          if (openBtn) {
-            openBtn.disabled = !enabled;
-            if (!enabled) openBtn.textContent = "Open";
-          }
-          if (!enabled) {
-            activeState.set(mod.id, false);
-            indicators.get(mod.id)?.classList.remove("ph-active");
-            updateCategoryChrome();
-          }
-        });
-        enableToggles.set(mod.id, toggle);
-        controls.appendChild(toggle);
-        card.append(cardMain, controls);
-        content.appendChild(card);
-      }
-    };
-    for (const cat of visibleCategories) {
-      const btn = document.createElement("button");
-      btn.className = "ph-category-tab";
-      btn.type = "button";
-      btn.addEventListener("click", () => {
-        selectedCategory = cat;
-        updateCategoryChrome();
-        renderContent();
-      });
-      const label = document.createElement("span");
-      label.className = "ph-category-label";
-      label.textContent = CATEGORY_LABELS[cat];
-      const badge = document.createElement("span");
-      badge.className = "ph-category-badge";
-      badge.textContent = "0";
-      btn.append(label, badge);
-      categoryBtns.set(cat, btn);
-      categoryBadges.set(cat, badge);
-      sidebar.appendChild(btn);
+      contentArea.appendChild(view);
     }
-    updateCategoryChrome();
+    function makeModRow(m, cat) {
+      const row = document.createElement("div");
+      row.className = "ph-mod-row";
+      const main = document.createElement("div");
+      main.className = "ph-mod-row-main";
+      const iconEl = document.createElement("span");
+      iconEl.className = "ph-mod-row-icon";
+      iconEl.textContent = m.icon;
+      const text = document.createElement("div");
+      text.className = "ph-mod-row-text";
+      const nameEl = document.createElement("div");
+      nameEl.className = "ph-mod-row-name";
+      nameEl.textContent = m.name;
+      if (m.description) nameEl.title = m.description;
+      const metaEl = document.createElement("div");
+      metaEl.className = "ph-mod-row-meta";
+      metaEl.textContent = m.activation + (m.surface ? " \xB7 " + (m.surface === "tool" ? "ferramenta" : "configur\xE1vel") : "");
+      text.append(nameEl, metaEl);
+      main.append(iconEl, text);
+      const controls = document.createElement("div");
+      controls.className = "ph-mod-row-controls";
+      if (m.surface) {
+        const label = m.surface === "tool" ? "Abrir" : "Configurar";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = m.surface === "tool" ? "ph-btn-open" : "ph-btn-config";
+        btn.textContent = label;
+        btn.disabled = !(localEnabled.get(m.id) ?? true);
+        btn.addEventListener("click", () => {
+          const contentEl = document.createElement("div");
+          void callbacks.onOpenModule(m.id, contentEl).then(() => {
+            navigate({ view: "module", moduleId: m.id, cat, contentEl });
+          });
+        });
+        controls.appendChild(btn);
+      }
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.className = "ph-toggle";
+      toggle.title = localEnabled.get(m.id) ? "Desativar m\xF3dulo" : "Ativar m\xF3dulo";
+      toggle.checked = localEnabled.get(m.id) ?? true;
+      toggle.addEventListener("change", () => {
+        const enabled = toggle.checked;
+        localEnabled.set(m.id, enabled);
+        callbacks.onToggleEnable(m.id, enabled);
+        const openBtn = controls.querySelector(".ph-btn-open, .ph-btn-config");
+        if (openBtn) openBtn.disabled = !enabled;
+        if (!enabled && router.view === "module" && router.moduleId === m.id) {
+          navigate({ view: "category", cat });
+        }
+        updateCategoryBadge(m.category);
+      });
+      controls.appendChild(toggle);
+      row.append(main, controls);
+      return row;
+    }
+    function renderModulePage(moduleId, cat, contentEl) {
+      const m = modules.find((mod) => mod.id === moduleId);
+      const view = document.createElement("div");
+      view.className = "ph-view-sub";
+      const topbar = document.createElement("div");
+      topbar.className = "ph-sub-topbar";
+      const backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.className = "ph-sub-back";
+      backBtn.textContent = "\u2190 Voltar";
+      backBtn.addEventListener("click", () => navigate({ view: "category", cat }));
+      const titleEl2 = document.createElement("span");
+      titleEl2.className = "ph-sub-title";
+      titleEl2.textContent = m?.name ?? moduleId;
+      topbar.append(backBtn, titleEl2);
+      const subContent = document.createElement("div");
+      subContent.className = "ph-sub-content";
+      subContent.appendChild(contentEl);
+      view.append(topbar, subContent);
+      contentArea.appendChild(view);
+    }
+    function updateStrip() {
+      for (const [, el] of stripCatIcons) el.remove();
+      stripCatIcons.clear();
+      for (const cat of CATEGORY_ORDER) {
+        const count = activeCountForCat(cat);
+        if (count === 0) continue;
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "ph-strip-item";
+        item.title = CATEGORY_LABELS[cat];
+        item.textContent = CATEGORY_ICONS[cat];
+        if (count > 0) {
+          const badge = document.createElement("span");
+          badge.className = "ph-strip-badge";
+          badge.textContent = String(count);
+          item.appendChild(badge);
+        }
+        item.addEventListener("click", () => {
+          overlay.classList.remove("ph-hidden");
+          navigate({ view: "category", cat });
+        });
+        strip.appendChild(item);
+        stripCatIcons.set(cat, item);
+      }
+    }
+    function updateCategoryBadge(cat) {
+      const badge = navBadges.get(cat);
+      if (badge) {
+        const count = activeCountForCat(cat);
+        badge.textContent = String(count);
+        badge.classList.toggle("ph-has-active", count > 0);
+      }
+      updateStrip();
+    }
+    renderNav();
     renderContent();
-    document.body.appendChild(dock);
+    updateStrip();
     return {
       setActive(id, active) {
         if (destroyed) return;
         activeState.set(id, active);
-        indicators.get(id)?.classList.toggle("ph-active", active);
-        const btn = toggleBtns.get(id);
-        if (btn) btn.textContent = active ? "Close" : "Open";
-        updateCategoryChrome();
+        const m = modules.find((mod) => mod.id === id);
+        if (m) updateCategoryBadge(m.category);
+        if (router.view === "home") renderContent();
       },
       destroy() {
         if (destroyed) return;
         destroyed = true;
-        renderedModuleIds = [];
-        activeState.clear();
-        indicators.clear();
-        toggleBtns.clear();
-        enableToggles.clear();
-        categoryBtns.clear();
-        categoryBadges.clear();
-        dock.replaceChildren();
-        dock.remove();
+        overlay.remove();
+        strip.remove();
       }
     };
+  }
+  function formatDuration(ms) {
+    const s = Math.floor(ms / 1e3);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}m${rem > 0 ? ` ${rem}s` : ""}`;
   }
 
   // src/core/shell.ts
   var AUTO_KINDS2 = ["auto", "page", "background"];
   var enabledKey = (id) => `enabled:${id}`;
-  var openKey = (id) => `open:${id}`;
   async function bootShell(registry, services, screen) {
     injectTheme();
     const storage = services.storage;
     const available = registry.available(screen);
     const enabledState = {};
-    const openState = {};
     for (const mod of available) {
       const stored = await storage.get(enabledKey(mod.id));
       enabledState[mod.id] = stored ?? false;
-      if (mod.activation === "toggle") {
-        openState[mod.id] = await storage.get(openKey(mod.id)) ?? false;
-      }
     }
-    let dock = null;
+    let hub = null;
     if (services.windows) {
       services.windows.onWindowClosed((id) => {
-        openState[id] = false;
-        void storage.set(openKey(id), false);
         registry.deactivate(id);
-        dock?.setActive(id, false);
+        hub?.setActive(id, false);
       });
     }
-    const activateToggle = async (id) => {
-      try {
-        await registry.activate(id);
-        const active = registry.isActive(id);
-        openState[id] = active;
-        await storage.set(openKey(id), active);
-        dock?.setActive(id, active);
-      } catch (err) {
-        openState[id] = false;
-        await storage.set(openKey(id), false);
-        dock?.setActive(id, false);
-        services.logger.error("Failed to open toggle module", id, err);
-      }
-    };
     for (const mod of available) {
       if (AUTO_KINDS2.includes(mod.activation) && enabledState[mod.id]) {
         void registry.activate(mod.id).then(() => {
-          dock?.setActive(mod.id, registry.isActive(mod.id));
+          hub?.setActive(mod.id, registry.isActive(mod.id));
         });
       }
     }
-    dock = createDock(available, enabledState, {
-      async onToggleEnable(id, enabled) {
-        enabledState[id] = enabled;
-        await storage.set(enabledKey(id), enabled);
-        const manifest4 = available.find((m) => m.id === id);
-        if (!manifest4) return;
-        if (AUTO_KINDS2.includes(manifest4.activation)) {
-          if (enabled) {
-            void registry.activate(id).then(() => dock?.setActive(id, registry.isActive(id)));
-          } else {
+    hub = createHub(
+      available,
+      enabledState,
+      services.gameData.snapshot(),
+      services.scheduler,
+      {
+        async onToggleEnable(id, enabled) {
+          enabledState[id] = enabled;
+          await storage.set(enabledKey(id), enabled);
+          const manifest4 = available.find((m) => m.id === id);
+          if (!manifest4) return;
+          if (AUTO_KINDS2.includes(manifest4.activation)) {
+            if (enabled) {
+              await registry.activate(id);
+              hub?.setActive(id, registry.isActive(id));
+            } else {
+              registry.deactivate(id);
+              hub?.setActive(id, false);
+            }
+          } else if (!enabled && registry.isActive(id)) {
             registry.deactivate(id);
-            dock?.setActive(id, false);
+            hub?.setActive(id, false);
           }
-        } else if (manifest4.activation === "toggle" && !enabled && registry.isActive(id)) {
-          openState[id] = false;
-          await storage.set(openKey(id), false);
+        },
+        async onOpenModule(id, contentEl) {
+          if (registry.isActive(id)) {
+            registry.deactivate(id);
+          }
+          await registry.activate(id, contentEl);
+          hub?.setActive(id, registry.isActive(id));
+        },
+        onCloseModule(id) {
+          registry.deactivate(id);
+          hub?.setActive(id, false);
+        },
+        async onRunCommand(id) {
+          await registry.activate(id);
           registry.deactivate(id);
         }
-      },
-      async onRun(id) {
-        await registry.activate(id);
-        registry.deactivate(id);
-      },
-      async onToggleOpen(id) {
-        if (registry.isActive(id)) {
-          openState[id] = false;
-          await storage.set(openKey(id), false);
-          registry.deactivate(id);
-        } else {
-          await activateToggle(id);
-        }
       }
-    });
-    for (const mod of available) {
-      if (mod.activation === "toggle" && enabledState[mod.id] && openState[mod.id]) {
-        void activateToggle(mod.id);
-      }
-    }
+    );
     const anchorEl = await waitForElement("new_quest", 3e3);
     if (anchorEl) {
       const launcher = document.createElement("div");
@@ -1365,7 +1753,7 @@
       launcherMark.alt = "Phantom";
       launcher.appendChild(launcherMark);
       launcher.addEventListener("click", () => {
-        document.getElementById("phantom-dock")?.classList.toggle("ph-hidden");
+        document.getElementById("phantom-overlay")?.classList.toggle("ph-hidden");
       });
       anchorEl.insertAdjacentElement("afterend", launcher);
     }
@@ -1486,7 +1874,9 @@
     allowedScreens: ["*"],
     // coordinate-based; works on any screen
     icon: "\u{1F4DD}",
-    description: "Adiciona notas a aldeias por coordenadas"
+    description: "Adiciona notas a aldeias por coordenadas",
+    surface: "tool"
+    // "Abrir" button → renders as hub sub-page
   };
 
   // src/game/world-data.ts
@@ -1777,14 +2167,21 @@ Aten\xE7\xE3o: substitui as notas existentes.`
   var notasManuaisModule = {
     manifest: manifest2,
     async init(ctx) {
-      windowHandle = ctx.services.windows.open({
-        moduleId: manifest2.id,
-        title: "Notas Manuais por Coordenadas",
-        defaultSize: { w: 480, h: 520 },
-        defaultPos: { x: 200, y: 80 }
-      });
-      const ui = await initUi2(ctx, windowHandle.contentEl);
-      cleanupUi2 = ui.destroy;
+      if (ctx.hubContent) {
+        const ui = await initUi2(ctx, ctx.hubContent);
+        cleanupUi2 = ui.destroy;
+        return;
+      }
+      if (ctx.services.windows) {
+        windowHandle = ctx.services.windows.open({
+          moduleId: manifest2.id,
+          title: "Notas Manuais por Coordenadas",
+          defaultSize: { w: 480, h: 520 },
+          defaultPos: { x: 200, y: 80 }
+        });
+        const ui = await initUi2(ctx, windowHandle.contentEl);
+        cleanupUi2 = ui.destroy;
+      }
     },
     destroy() {
       cleanupUi2?.();
@@ -2305,7 +2702,9 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       logger: createLogger(),
       storage,
       windows: createWindowManager(storage),
-      request: createRequestService(gameData)
+      request: createRequestService(gameData),
+      scheduler: createSchedulerService(storage),
+      worldConfig: createWorldConfigService(gameData, storage)
     };
     const registry = createRegistry({ state, eventBus, services });
     registry.register(status_overview_default);

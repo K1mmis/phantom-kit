@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "author": "Dirty Mind & K1mmis",
   "scripts": {
     "build": "node build.mjs",
     "build:zip": "node build.mjs --zip"
