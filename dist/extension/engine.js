@@ -1545,17 +1545,17 @@
     "alertas": "Alertas"
   };
   var CATEGORY_ICONS = {
-    "scripts-aldeia": "SA",
-    "farm-buscas": "FB",
-    "kit-ataque": "KA",
-    "kit-defesa": "KD",
-    "cunhagem": "CU",
-    "notas-relatorios": "NR",
-    "mapa": "MP",
-    "tribo": "TR",
-    "utilidades": "UT",
-    "captcha": "CP",
-    "alertas": "AL"
+    "scripts-aldeia": "\u{1F3E0}",
+    "farm-buscas": "\u{1F33E}",
+    "kit-ataque": "\u2694\uFE0F",
+    "kit-defesa": "\u{1F6E1}\uFE0F",
+    "cunhagem": "\u{1FA99}",
+    "notas-relatorios": "\u{1F4DD}",
+    "mapa": "\u{1F5FA}\uFE0F",
+    "tribo": "\u{1F3F0}",
+    "utilidades": "\u{1F527}",
+    "captcha": "\u{1F510}",
+    "alertas": "\u{1F514}"
   };
   var CATEGORY_ORDER = [
     "scripts-aldeia",
@@ -1581,6 +1581,7 @@
     let stripCollapsed = false;
     const monitorDetails = /* @__PURE__ */ new Map();
     const monitorUnsubs = [];
+    const monitorTimer = setInterval(updateMonitorTimers, 1e3);
     let profileDetails = null;
     for (const m of modules) localEnabled.set(m.id, enabledState[m.id] ?? true);
     for (const m of modules) {
@@ -1661,7 +1662,7 @@
       navItems.set(key, el);
       return el;
     };
-    sidebar.appendChild(makeNavItem("PH", "Inicio", "home", () => navigate({ view: "home" })));
+    sidebar.appendChild(makeNavItem("\u{1F47B}", "Inicio", "home", () => navigate({ view: "home" })));
     const sep = document.createElement("div");
     sep.className = "ph-nav-sep";
     sidebar.appendChild(sep);
@@ -1677,7 +1678,7 @@
     const automationSep = document.createElement("div");
     automationSep.className = "ph-nav-sep ph-nav-sep-automation";
     sidebar.appendChild(automationSep);
-    sidebar.appendChild(makeNavItem("WF", "Automacao", AUTOMATION_NAV_KEY, () => navigate({ view: "automation" })));
+    sidebar.appendChild(makeNavItem("\u2699\uFE0F", "Automacao", AUTOMATION_NAV_KEY, () => navigate({ view: "automation" })));
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) overlay.classList.add("ph-hidden");
     });
@@ -1735,6 +1736,7 @@
       } else if (router.view === "module") {
         renderModulePage(router.moduleId, router.cat, router.contentEl);
       }
+      updateMonitorTimers();
     }
     function renderHome() {
       const view = document.createElement("div");
@@ -1809,7 +1811,7 @@
       row.className = "ph-monitor-row";
       const icon = document.createElement("span");
       icon.className = "ph-mon-icon";
-      icon.textContent = safeIcon(m.icon, m.name);
+      icon.textContent = m.icon;
       const name = document.createElement("span");
       name.className = "ph-mon-name";
       name.textContent = m.name;
@@ -1837,6 +1839,8 @@
       timerEl.className = "ph-mon-timer";
       if (m.activation === "background" && isActive) {
         const remaining = details?.nextCycle ? Math.max(0, details.nextCycle - Date.now()) : scheduler?.getRemaining(m.id) ?? 0;
+        const nextCycle = details?.nextCycle ?? (remaining > 0 ? Date.now() + remaining : void 0);
+        if (nextCycle) timerEl.dataset.nextCycle = String(nextCycle);
         timerEl.textContent = remaining > 0 ? formatDuration(remaining) : "-";
       }
       const summary = document.createElement("div");
@@ -1951,7 +1955,7 @@
           const row = document.createElement("div");
           row.className = "ph-workflow-row";
           const icon = document.createElement("span");
-          icon.textContent = safeIcon(m.icon, m.name);
+          icon.textContent = m.icon;
           const name = document.createElement("span");
           name.textContent = m.name;
           const meta = document.createElement("span");
@@ -1970,7 +1974,7 @@
       main.className = "ph-mod-row-main";
       const iconEl = document.createElement("span");
       iconEl.className = "ph-mod-row-icon";
-      iconEl.textContent = safeIcon(m.icon, m.name);
+      iconEl.textContent = m.icon;
       const text = document.createElement("div");
       text.className = "ph-mod-row-text";
       const nameEl = document.createElement("div");
@@ -2087,6 +2091,7 @@
       destroy() {
         if (destroyed) return;
         destroyed = true;
+        clearInterval(monitorTimer);
         for (const unsub of monitorUnsubs) unsub();
         questLauncher?.remove();
         overlay.remove();
@@ -2109,6 +2114,15 @@
       anchorEl.insertAdjacentElement("afterend", launcher);
       questLauncher = launcher;
     }
+    function updateMonitorTimers() {
+      if (destroyed) return;
+      contentArea.querySelectorAll(".ph-mon-timer[data-next-cycle]").forEach((el) => {
+        const nextCycle = parseInt(el.dataset.nextCycle ?? "", 10);
+        if (!Number.isFinite(nextCycle)) return;
+        const remaining = Math.max(0, nextCycle - Date.now());
+        el.textContent = remaining > 0 ? formatDuration(remaining) : "-";
+      });
+    }
   }
   function formatDuration(ms) {
     const s = Math.floor(ms / 1e3);
@@ -2128,9 +2142,6 @@
       values.add("Buscas");
     }
     return Array.from(values);
-  }
-  function safeIcon(icon, label) {
-    return /^[\x20-\x7E]{1,3}$/.test(icon) ? icon : initials(label);
   }
   function initials(label) {
     const parts = (label ?? "P").split(/\s+/).map((part) => part.trim()).filter(Boolean);
@@ -2153,7 +2164,9 @@
   function parseProfileDetails(html) {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const playerInfo = doc.querySelector("#player_info");
-    const image = playerInfo?.querySelector('td[colspan="2"][align="center"] img, img[alt="Imagem pessoal"]');
+    const image = playerInfo?.querySelector(
+      'img[src*="/graphic/userimage/"], img[src*="graphic/userimage/"], img[alt="Imagem pessoal"]'
+    );
     const details = {
       imageUrl: image?.src
     };
@@ -2371,7 +2384,7 @@
     icon: "\u{1F4DD}",
     description: "Adiciona notas a aldeias por coordenadas",
     surface: "tool"
-    // "Abrir" button → renders as hub sub-page
+    // "Abrir" button -> renders as hub sub-page
   };
 
   // src/game/world-data.ts
@@ -2702,7 +2715,7 @@ Aten\xE7\xE3o: substitui as notas existentes.`
       "place" /* PLACE */
     ],
     icon: "\u{1F3A8}",
-    description: "Bot\xF5es de renomea\xE7\xE3o r\xE1pida com cores nos ataques recebidos"
+    description: "Botoes de renomeacao rapida com cores nos ataques recebidos"
   };
 
   // src/modules/renomear-cores/constants.ts
