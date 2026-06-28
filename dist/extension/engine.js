@@ -892,8 +892,8 @@
       gap: 10px;
     }
     .ph-profile-avatar {
-      width: 54px;
-      height: 54px;
+      width: 68px;
+      height: 68px;
       border: 1px solid var(--ph-border-soft);
       border-radius: var(--ph-radius);
       background: var(--ph-surface-alt);
@@ -1806,7 +1806,7 @@
       nameEl.textContent = gameData?.player.name ?? "-";
       const meta = document.createElement("div");
       meta.className = "ph-profile-meta";
-      const tribe = gameData?.player.ally_tag ? `[${gameData.player.ally_tag}]` : "Sem tribo";
+      const tribe = profileDetails?.tribe ?? (gameData?.player.ally_tag ? `[${gameData.player.ally_tag}]` : "Sem tribo");
       meta.innerHTML = `Mundo: <b>${gameData?.world ?? "-"}</b> &nbsp;-&nbsp; Tribo: <b>${tribe}</b>`;
       const stats = document.createElement("div");
       stats.className = "ph-profile-stats";
@@ -2207,9 +2207,7 @@
   async function loadProfileDetails() {
     const playerId = window.game_data?.player?.id;
     if (!playerId) return null;
-    const url = new URL("/game.php", window.location.origin);
-    const villageId = window.game_data?.village?.id;
-    if (villageId) url.searchParams.set("village", String(villageId));
+    const url = new URL("/guest.php", window.location.origin);
     url.searchParams.set("screen", "info_player");
     url.searchParams.set("id", String(playerId));
     const res = await fetch(url.toString(), { credentials: "same-origin" });
@@ -2220,11 +2218,11 @@
   function parseProfileDetails(html) {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const playerInfo = doc.querySelector("#player_info");
-    const image = playerInfo?.querySelector(
-      'img[src*="/graphic/userimage/"], img[src*="graphic/userimage/"], img[alt="Imagem pessoal"]'
-    );
+    const image = doc.querySelector('img[src*="userimage"]');
+    const tribeLink = (playerInfo ?? doc).querySelector('a[href*="screen=info_ally"]');
     const details = {
-      imageUrl: image?.src
+      imageUrl: image?.getAttribute("src") ?? void 0,
+      tribe: tribeLink ? cleanText(tribeLink.textContent) : void 0
     };
     playerInfo?.querySelectorAll("tr").forEach((row) => {
       const cells = row.querySelectorAll("td");
@@ -2232,7 +2230,7 @@
       const label = normalizeLabel(cells[0]?.textContent);
       const value = cleanText(cells[1]?.textContent);
       if (label.startsWith("pontos")) details.points = value;
-      if (label.startsWith("classifica")) details.rank = value;
+      if (label.startsWith("posi") || label.startsWith("classifica")) details.rank = value;
     });
     return details;
   }
