@@ -6,6 +6,8 @@
   "author": "Dirty Mind & K1mmis",
   "scripts": {
     "build": "node build.mjs",
-    "build:zip": "node build.mjs --zip"
+    "build:zip": "node build.mjs --zip",
+    "build:userscript": "node build-userscript.mjs",
+    "build:all": "node build.mjs && node build-userscript.mjs"
   }
 }
