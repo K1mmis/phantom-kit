@@ -6,7 +6,10 @@
   "author": "Dirty Mind & K1mmis",
   "content_scripts": [
     {
-      "matches": ["*://*.tribalwars.com.br/game.php*"],
+      "matches": [
+        "*://*.tribalwars.com.br/game.php*",
+        "*://*.tribalwars.com.pt/game.php*"
+      ],
       "js": ["engine.js"],
       "run_at": "document_idle",
       "world": "MAIN"
