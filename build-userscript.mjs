@@ -40,7 +40,7 @@ const header = `// ==UserScript==
 // @icon         https://imgur.com/a/JGtiT9M
 // @namespace    https://github.com/K1mmis/phantom
 // @version      ${version}
-// @description  Plataforma modular para Tribal Wars — canal beta
+// @description  Canal Beta
 // @author       Dirty Mind & K1mmis
 // @match        *://*.tribalwars.com.br/game.php*
 // @match        *://*.tribalwars.com.pt/game.php*
