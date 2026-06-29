@@ -36,7 +36,8 @@ const engine = readFileSync(ENGINE_SRC, 'utf8')
 // @noframes    → só no top frame, igual ao default da extensão (all_frames:false).
 // @run-at document-idle → paridade com o manifest (game_data não existe em document-start).
 const header = `// ==UserScript==
-// @name         K1mmis Phantom (beta)
+// @name         Phantom (beta)
+// @icon         https://imgur.com/a/JGtiT9M
 // @namespace    https://github.com/K1mmis/phantom
 // @version      ${version}
 // @description  Plataforma modular para Tribal Wars — canal beta
